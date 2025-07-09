@@ -1,0 +1,16 @@
+# Ignore compiled binaries (Windows and Unix)
+*.exe
+
+# Golang files
+*.mod
+*.sum
+
+# Ignore database files
+*.db*
+
+# Ignore log files
+*.log
+
+# Ignore VS Code and other editor metadata
+.vscode/
+.idea/
