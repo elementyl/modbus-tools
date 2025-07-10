@@ -1,10 +1,6 @@
 # Ignore compiled binaries (Windows and Unix)
 *.exe
 
-# Golang files
-*.mod
-*.sum
-
 # Ignore database files
 *.db*
 
