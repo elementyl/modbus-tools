@@ -2,8 +2,8 @@ package poller
 
 import (
 	"fmt"
-	"modbus-tools/modbus-go-poller/config" // Ensure this path is correct!
-	"modbus-tools/modbus-go-poller/database" // Ensure this path is correct!
+	"modbus-tools/modbus-go-poller/config"
+	"modbus-tools/modbus-go-poller/database"
 	"sync"
 	"time"
 )
@@ -56,9 +56,6 @@ func NewPollerState(dbEventChan chan<- database.Event, appConfig *config.AppConf
 	}
 	return ps
 }
-
-// NOTE: LoadConfigurationFromDB, ScaleValue, and UnscaleValue have been removed from this file.
-// They now live in loader.go and utils.go respectively.
 
 func (ps *PollerState) SendCommand(cmd interface{}) { ps.CommandChan <- cmd }
 

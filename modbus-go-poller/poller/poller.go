@@ -135,9 +135,10 @@ func RunIO(ctx context.Context, wg *sync.WaitGroup, state *PollerState, log *log
 				return
 			case cmd := <-state.CommandChan:
 				var packet []byte
-				var dbEvent database.Event
-				dbEvent.EventType = "USER_COMMAND"
-				dbEvent.Timestamp = time.Now()
+				dbEvent := database.Event{
+					EventType: "USER_COMMAND",
+					Timestamp: time.Now(),
+				}
 				switch c := cmd.(type) {
 				case SetBitCmd:
 					current, _, _, _, _, _, _ := state.GetSnapshot()
@@ -178,29 +179,36 @@ func RunIO(ctx context.Context, wg *sync.WaitGroup, state *PollerState, log *log
 
 				case WriteEngCmd:
 					var pointDef *config.PointDefinition
-					if points, ok := state.Config.PointsByAddress[c.Addr]; ok {
-						for _, p := range points {
+					if pds, ok := state.Config.PointsByAddress[c.Addr]; ok {
+						for _, p := range pds {
 							if p.Type == "analog" {
 								pointDef = p
 								break
 							}
 						}
 					}
-					if pointDef == nil {
-						log.Printf("ERROR: Could not find analog point definition for addr %d", c.Addr)
-						continue
-					}
+
 					rawVal := UnscaleValue(c.EngVal, pointDef)
+
 					packet = buildWriteRequest(config.DefaultSlaveID, c.Addr, rawVal)
-					log.Printf("SOE: [USER_COMMAND] %s written to %.2f (Raw: %d)", pointDef.PointName, c.EngVal, rawVal)
-					dbEvent.PointName = pointDef.PointName
+
+					pointName := fmt.Sprintf("Register %d", c.Addr)
+					if pointDef != nil {
+						pointName = pointDef.PointName
+					}
+					log.Printf("SOE: [USER_COMMAND] %s written to %.2f (Raw: %d)", pointName, c.EngVal, rawVal)
+					dbEvent.PointName = pointName
 					dbEvent.NewValue = fmt.Sprintf("%.2f", c.EngVal)
-					dbEvent.Units = pointDef.Unit
+					if pointDef != nil {
+						dbEvent.Units = pointDef.Unit
+					}
 					state.DBEventChan <- dbEvent
+
 					state.mu.Lock()
-					state.WriteSuppressions[pointDef.PointName] = fmt.Sprintf("%.2f", c.EngVal)
+					state.WriteSuppressions[pointName] = fmt.Sprintf("%.2f", c.EngVal)
 					state.mu.Unlock()
 				}
+
 				if packet != nil {
 					txTime := time.Now()
 					state.UpdateTx(packet, txTime)
