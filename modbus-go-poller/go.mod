@@ -1,4 +1,4 @@
-module github.com/elementyl/modbus-tools/modbus-go-poller
+module modbus-tools/modbus-go-poller
 
 go 1.24.4
 

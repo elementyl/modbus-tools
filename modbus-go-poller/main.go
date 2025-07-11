@@ -1,18 +1,18 @@
 package main
 
 import (
-	"context" // ADDED
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
 	"log"
-	"modbus-go-poller/config"
-	"modbus-go-poller/database"
-	"modbus-go-poller/poller"
-	"modbus-go-poller/tui"
+	"modbus-tools/modbus-go-poller/config"
+	"modbus-tools/modbus-go-poller/database"
+	"modbus-tools/modbus-go-poller/poller"
+	"modbus-tools/modbus-go-poller/tui"
 	"os"
 	"os/signal"
-	"sync" // ADDED
+	"sync"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -59,13 +59,14 @@ func main() {
 	}
 	defer dbConn.Close()
 
-	if err := database.InitDatabase(dbConn, dbLogger); err != nil {
-		log.Fatalf("FATAL: Could not initialize database schema: %v", err)
-	}
+	// The one-time migration logic has been removed. The poller now expects a fully initialized database.
+	// if err := database.InitDatabase(dbConn, dbLogger); err != nil {
+	// 	log.Fatalf("FATAL: Could not initialize database schema: %v", err)
+	// }
 
 	appConfig, err := poller.LoadConfigurationFromDB(dbConn)
 	if err != nil {
-		log.Fatalf("FATAL: Could not load configuration from database: %v", err)
+		log.Fatalf("FATAL: Could not load configuration from database: %v.\nHINT: Please ensure '%s' exists and is a valid poller database. You can create it using the 'modbus-db-init' tool.", err, *dbFile)
 	}
 	log.Printf("Successfully loaded %d points from database.", len(appConfig.PointsByName))
 
@@ -99,7 +100,7 @@ func main() {
 	// --- Graceful Shutdown Handling ---
 	shutdownChan := make(chan os.Signal, 1)
 	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
-	
+
 	select {
 	case <-shutdownChan: // Triggered by Ctrl-C
 		log.Println("Shutdown signal received. Cleaning up.")

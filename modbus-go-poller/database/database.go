@@ -33,8 +33,6 @@ CREATE TABLE IF NOT EXISTS events (
 );`
 
 // DatabaseWriter is a long-running goroutine that listens for events and writes them to a daily SQLite database.
-// --- MODIFIED FUNCTION ---
-// DatabaseWriter is a long-running goroutine that listens for events and writes them to a daily SQLite database.
 func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Event, logger *log.Logger) {
 	defer wg.Done()
 	logger.Println("Database Writer Goroutine Started.")
@@ -97,7 +95,7 @@ func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Ev
 			// Process any remaining events in the channel buffer before shutting down
 			for len(eventChan) > 0 {
 				event := <-eventChan
-				writeEvent(event) // Use the helper to write the final events
+				writeEvent(event)
 			}
 			return
 		}

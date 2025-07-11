@@ -10,3 +10,6 @@
 # Ignore VS Code and other editor metadata
 .vscode/
 .idea/
+
+.DS_Store
+Thumbs.db

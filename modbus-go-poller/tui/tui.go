@@ -3,56 +3,148 @@ package tui
 import (
 	"fmt"
 	"log"
-	"modbus-go-poller/poller"
+	"modbus-tools/modbus-go-poller/poller"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
+// --- STYLES ---
+var (
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FAFAFA")).
+			Background(lipgloss.Color("#575B7E")).
+			Padding(0, 1)
+
+	baseStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240"))
+
+	statusKeyStyle = lipgloss.NewStyle().Bold(true)
+
+	alarmCritStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	alarmWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
+
+	changedStyle      = lipgloss.NewStyle().Background(lipgloss.Color("202")).Foreground(lipgloss.Color("0"))
+	pointNameStyle    = lipgloss.NewStyle().Width(28)
+	pointAddressStyle = lipgloss.NewStyle().Width(10).Align(lipgloss.Right)
+	pointValueStyle   = lipgloss.NewStyle().Width(20).Align(lipgloss.Right)
+	pointUnitStyle    = lipgloss.NewStyle().Width(10)
+)
+
+// --- MODEL ---
 type tickMsg time.Time
+
 type Model struct {
 	state          *poller.PollerState
 	log            *log.Logger
+	viewport       viewport.Model
 	textInput      textinput.Model
-	status         string
-	datastore      map[uint16]uint16
-	prevData       map[uint16]uint16
-	activeAlarms   map[string]poller.ActiveAlarm
-	lastTx, lastRx poller.TxRxInfo
-	timing         poller.TimingInfo
+	ready          bool
+	lastDataRender string
+	lastChange     map[uint16]time.Time
 }
 
-func doTick() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
-}
 func NewModel(ps *poller.PollerState, logger *log.Logger) Model {
 	ti := textinput.New()
 	ti.Placeholder = "e.g., set \"Motor Running\" | write \"Tank Level SP\" 25.5"
 	ti.Focus()
+
 	return Model{
-		state:     ps,
-		log:       logger,
-		textInput: ti,
-		datastore: make(map[uint16]uint16),
-		prevData:  make(map[uint16]uint16),
+		state:      ps,
+		log:        logger,
+		textInput:  ti,
+		lastChange: make(map[uint16]time.Time),
 	}
 }
+
 func (m Model) Init() tea.Cmd {
-	return doTick()
+	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
+
+// --- UPDATE ---
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var (
+		cmd  tea.Cmd
+		cmds []tea.Cmd
+	)
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if m.textInput.Focused() {
+			switch msg.Type {
+			case tea.KeyEnter:
+				m.handleCommand()
+				m.textInput.Blur()
+				return m, nil
+			case tea.KeyCtrlC, tea.KeyEsc:
+				m.textInput.Blur()
+				return m, nil
+			}
+		} else {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "i", "c":
+				m.textInput.Focus()
+				return m, nil
+			}
+		}
+
+	case tea.WindowSizeMsg:
+		// Layout constants
+		topPaneHeight := 8
+		bottomPaneHeight := 4
+		verticalMargin := topPaneHeight + bottomPaneHeight
+
+		if !m.ready {
+			m.viewport = viewport.New(msg.Width, msg.Height-verticalMargin)
+			m.viewport.Style = baseStyle
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width
+			m.viewport.Height = msg.Height - verticalMargin
+		}
+		// Force re-render on resize
+		m.lastDataRender = ""
+
+	case tickMsg:
+		// Re-render content only if something has changed.
+		newRender := m.renderDataPane()
+		if m.lastDataRender != newRender {
+			m.viewport.SetContent(newRender)
+			m.lastDataRender = newRender
+		}
+		return m, tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+	}
+
+	if m.textInput.Focused() {
+		m.textInput, cmd = m.textInput.Update(msg)
+		cmds = append(cmds, cmd)
+	} else {
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
 func (m *Model) handleCommand() {
 	input := strings.TrimSpace(m.textInput.Value())
 	if input == "" {
 		return
 	}
 	m.log.Printf("TUI: User input: '%s'", input)
+
 	var parts []string
 	var inQuote bool
 	var currentPart []rune
@@ -71,6 +163,7 @@ func (m *Model) handleCommand() {
 	if len(currentPart) > 0 {
 		parts = append(parts, string(currentPart))
 	}
+
 	if len(parts) == 0 {
 		return
 	}
@@ -78,89 +171,98 @@ func (m *Model) handleCommand() {
 	switch command {
 	case "set", "s", "clear", "c":
 		if len(parts) < 2 {
-			m.status = "Error: command requires a point name."
+			m.state.SetStatus("Error: command requires a point name.")
 			return
 		}
 		pointName := parts[1]
 		pointDef, found := m.state.Config.PointsByName[pointName]
 		if !found || pointDef.Type != "bitmap" {
-			m.status = fmt.Sprintf("Error: Bitmap point '%s' not found.", pointName)
+			m.state.SetStatus(fmt.Sprintf("Error: Bitmap point '%s' not found.", pointName))
 			return
 		}
 		isSet := (command == "set" || command == "s")
 		m.state.SendCommand(poller.SetBitCmd{Addr: pointDef.Address, Bit: *pointDef.Bit, Val: isSet})
-		m.status = fmt.Sprintf("Queued %s \"%s\"", command, pointName)
+		m.state.SetStatus(fmt.Sprintf("Queued %s \"%s\"", command, pointName))
 	case "write", "w":
 		if len(parts) < 3 {
-			m.status = "Error: 'write' requires point name and value."
+			m.state.SetStatus("Error: 'write' requires point name and value.")
 			return
 		}
 		pointName := parts[1]
 		valStr := parts[2]
 		pointDef, found := m.state.Config.PointsByName[pointName]
 		if !found || pointDef.Type != "analog" {
-			m.status = fmt.Sprintf("Error: Analog point '%s' not found.", pointName)
+			m.state.SetStatus(fmt.Sprintf("Error: Analog point '%s' not found.", pointName))
 			return
 		}
 		valFloat, err := strconv.ParseFloat(valStr, 64)
 		if err != nil {
-			m.status = fmt.Sprintf("Error: Invalid value '%s'.", valStr)
+			m.state.SetStatus(fmt.Sprintf("Error: Invalid value '%s'.", valStr))
 			return
 		}
 		m.state.SendCommand(poller.WriteEngCmd{Addr: pointDef.Address, EngVal: valFloat})
-		m.status = fmt.Sprintf("Queued write %.2f to %s.", valFloat, pointName)
+		m.state.SetStatus(fmt.Sprintf("Queued write %.2f to %s.", valFloat, pointName))
 	default:
-		m.status = fmt.Sprintf("Error: Unknown command '%s'.", command)
+		m.state.SetStatus(fmt.Sprintf("Error: Unknown command '%s'.", command))
 	}
 	m.textInput.SetValue("")
 }
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
-			return m, tea.Quit
-		case tea.KeyEnter:
-			m.handleCommand()
-			return m, nil
-		}
-	case tickMsg:
-		m.datastore, m.prevData, m.activeAlarms, m.lastTx, m.lastRx, m.timing, m.status = m.state.GetSnapshot()
-		return m, doTick()
-	case tea.WindowSizeMsg:
-		return m, nil
-	}
-	m.textInput, cmd = m.textInput.Update(msg)
-	return m, cmd
-}
-func (m Model) View() string {
-	var b strings.Builder
-	changedStyle := lipgloss.NewStyle().Reverse(true)
-	alarmCritStyle := lipgloss.NewStyle().Background(lipgloss.Color("9")).Foreground(lipgloss.Color("15"))
-	alarmWarnStyle := lipgloss.NewStyle().Background(lipgloss.Color("11")).Foreground(lipgloss.Color("0"))
 
-	b.WriteString("--- Active Alarms ---\n")
-	if len(m.activeAlarms) == 0 {
-		b.WriteString("No active alarms.\n")
+// --- VIEW ---
+func (m Model) View() string {
+	if !m.ready {
+		return "Initializing..."
+	}
+	topPane := lipgloss.JoinHorizontal(lipgloss.Left,
+		m.renderAlarmsPane(),
+		m.renderStatusPane(),
+	)
+	return lipgloss.JoinVertical(lipgloss.Left,
+		topPane,
+		m.viewport.View(),
+		m.renderFooter(),
+	)
+}
+
+func (m Model) renderAlarmsPane() string {
+	_, _, alarms, _, _, _, _ := m.state.GetSnapshot()
+	var content strings.Builder
+	content.WriteString(titleStyle.Render("Active Alarms") + "\n")
+	if len(alarms) == 0 {
+		content.WriteString("No active alarms.")
 	} else {
-		var keys []string
-		for k := range m.activeAlarms {
+		keys := make([]string, 0, len(alarms))
+		for k := range alarms {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			alarm := m.activeAlarms[k]
+			alarm := alarms[k]
+			style := alarmWarnStyle
 			if alarm.Severity == "CRITICAL" {
-				b.WriteString(alarmCritStyle.Render(fmt.Sprintf("[%s] %s", alarm.Severity, alarm.Message)))
-			} else {
-				b.WriteString(alarmWarnStyle.Render(fmt.Sprintf("[%s] %s", alarm.Severity, alarm.Message)))
+				style = alarmCritStyle
 			}
-			b.WriteString("\n")
+			content.WriteString(style.Render(fmt.Sprintf("[%s] %s", alarm.Severity, alarm.Message)) + "\n")
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString("--- Interpreted Register Values ---\n")
+	return baseStyle.Width(m.viewport.Width/2 - 2).Height(6).Render(content.String())
+}
+
+func (m Model) renderStatusPane() string {
+	_, _, _, tx, rx, timing, status := m.state.GetSnapshot()
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		titleStyle.Render("Status & Timing"),
+		statusKeyStyle.Render("Status: ")+status,
+		statusKeyStyle.Render("Last RTT: ")+fmt.Sprintf("%.2f ms", timing.RoundTripTimeMs),
+		statusKeyStyle.Render("TX Count: ")+fmt.Sprintf("%d", tx.Count),
+		statusKeyStyle.Render("RX Count: ")+fmt.Sprintf("%d", rx.Count),
+	)
+	// FIX IS HERE: We now pass the 'content' string directly to Render().
+	return baseStyle.Width(m.viewport.Width/2 - 2).Height(6).Render(content)
+}
+
+func (m Model) renderDataPane() string {
+	datastore, prevData, _, _, _, _, _ := m.state.GetSnapshot()
 
 	var sortedAddresses []uint16
 	for addr := range m.state.Config.PointsByAddress {
@@ -168,83 +270,91 @@ func (m Model) View() string {
 	}
 	sort.Slice(sortedAddresses, func(i, j int) bool { return sortedAddresses[i] < sortedAddresses[j] })
 
+	// Detect which registers are part of a multi-register value (the heartbeat)
+	isSecondaryReg := make(map[uint16]bool)
+	if _, ok := datastore[40008]; ok {
+		isSecondaryReg[40009] = true
+	}
+
+	// Update last change times
 	for _, addr := range sortedAddresses {
-		pointDefs, ok := m.state.Config.PointsByAddress[addr]
-		if !ok || len(pointDefs) == 0 {
+		if datastore[addr] != prevData[addr] {
+			m.lastChange[addr] = time.Now()
+		}
+	}
+
+	var content strings.Builder
+	header := lipgloss.JoinHorizontal(lipgloss.Left,
+		pointNameStyle.Render("Point Name"),
+		pointAddressStyle.Render("Address"),
+		pointValueStyle.Render("Value"),
+		pointUnitStyle.Render("Unit"),
+	)
+	content.WriteString(titleStyle.Render(header) + "\n")
+
+	for _, addr := range sortedAddresses {
+		if isSecondaryReg[addr] {
 			continue
 		}
 
-		currentVal := m.datastore[addr]
-		prevVal, hasPrev := m.prevData[addr]
-		isChanged := hasPrev && currentVal != prevVal
+		pointDefs, _ := m.state.Config.PointsByAddress[addr]
+		currentVal := datastore[addr]
+		style := lipgloss.NewStyle()
+		if time.Since(m.lastChange[addr]) < 2*time.Second {
+			style = changedStyle
+		}
 
-		var line string
-
-		if pointDefs[0].Type == "analog" {
-			analogPoint := pointDefs[0]
-			var baseLine string
-
-			var rawDisplayValue interface{}
-			if analogPoint.DataType == "signed" {
-				rawDisplayValue = int16(currentVal)
-			} else {
-				rawDisplayValue = currentVal
+		if pointDefs[0].Type == "bitmap" {
+			content.WriteString(style.Render(fmt.Sprintf("Reg %d (Bitmap)", addr)) + "\n")
+			sort.Slice(pointDefs, func(i, j int) bool { return *pointDefs[i].Bit < *pointDefs[j].Bit })
+			for _, pd := range pointDefs {
+				isSet := (currentVal>>*pd.Bit)&1 == 1
+				stateText := pd.StateOff
+				if isSet {
+					stateText = pd.StateOn
+				}
+				line := lipgloss.JoinHorizontal(lipgloss.Left,
+					pointNameStyle.Render("  "+pd.PointName),
+					pointAddressStyle.Render(fmt.Sprintf("%d/%d", pd.Address, *pd.Bit)),
+					pointValueStyle.Render(stateText),
+				)
+				content.WriteString(style.Render(line) + "\n")
 			}
-
+		} else { // analog
+			pd := pointDefs[0]
+			var valStr, addrStr string
+			// Special handling for 32-bit heartbeat
 			if addr == 40008 {
-				highWord := m.datastore[40008]
-				lowWord := m.datastore[40009]
+				highWord, _ := datastore[40008]
+				lowWord, _ := datastore[40009]
 				unixTime := (uint32(highWord) << 16) | uint32(lowWord)
 				t := time.Unix(int64(unixTime), 0)
-				baseLine = fmt.Sprintf("Reg %d (%-25s): Raw: %-5d -> %s", addr, analogPoint.PointName, rawDisplayValue, t.UTC().Format("2006-01-02 15:04:05 UTC"))
-			} else if addr == 40009 {
-				baseLine = fmt.Sprintf("Reg %d (%-25s): Raw: %-5d -> (see 40008)", addr, analogPoint.PointName, rawDisplayValue)
+				valStr = t.UTC().Format("2006-01-02 15:04:05 UTC")
+				addrStr = "40008-9"
 			} else {
-				scaledVal := poller.ScaleValue(currentVal, analogPoint)
-				baseLine = fmt.Sprintf("Reg %d (%-25s): Raw: %-5d Scaled: %7.2f %s", addr, analogPoint.PointName, rawDisplayValue, scaledVal, analogPoint.Unit)
+				scaledVal := poller.ScaleValue(currentVal, pd)
+				valStr = fmt.Sprintf("%.2f", scaledVal)
+				addrStr = fmt.Sprintf("%d", addr)
 			}
-			line = baseLine + "\n"
-
-		} else {
-			var sb strings.Builder
-			sb.WriteString(fmt.Sprintf("Reg %d (Bitmap Register          ): %-6d (%016b)\n", addr, currentVal, currentVal))
-
-			sort.Slice(pointDefs, func(i, j int) bool { return *pointDefs[i].Bit < *pointDefs[j].Bit })
-
-			for _, pointDef := range pointDefs {
-				isSet := (currentVal>>*pointDef.Bit)&1 == 1
-				stateText := pointDef.StateOff
-				if isSet {
-					stateText = pointDef.StateOn
-				}
-
-				isAbnormal := false
-				if pointDef.NormalState != nil {
-					isAbnormal = (isSet && *pointDef.NormalState == 0) || (!isSet && *pointDef.NormalState == 1)
-				}
-				stateStyle := lipgloss.NewStyle()
-				if isAbnormal {
-					stateStyle = stateStyle.Bold(true).Foreground(lipgloss.Color("11"))
-				}
-
-				sb.WriteString(fmt.Sprintf("  Bit %2d: %-28s: %s\n", *pointDef.Bit, pointDef.PointName, stateStyle.Render(stateText)))
-			}
-			line = sb.String()
+			line := lipgloss.JoinHorizontal(lipgloss.Left,
+				pointNameStyle.Render(pd.PointName),
+				pointAddressStyle.Render(addrStr),
+				pointValueStyle.Render(valStr),
+				pointUnitStyle.Render(pd.Unit),
+			)
+			content.WriteString(style.Render(line) + "\n")
 		}
-
-		if isChanged {
-			b.WriteString(changedStyle.Render(line))
-		} else {
-			b.WriteString(line)
-		}
-		b.WriteString("\n")
 	}
+	return content.String()
+}
 
-	b.WriteString("--- Timing Analysis ---\n")
-	b.WriteString(fmt.Sprintf("  Round Trip Time: %.2f ms\n\n", m.timing.RoundTripTimeMs))
-	b.WriteString("--- Last Transaction (Hex) ---\n")
-	b.WriteString(fmt.Sprintf("  TX [%d]: [%s] %s\n", m.lastTx.Count, m.lastTx.Timestamp, m.lastTx.Hex))
-	b.WriteString(fmt.Sprintf("  RX [%d]: [%s] %s\n", m.lastRx.Count, m.lastRx.Timestamp, m.lastRx.Hex))
-	footer := fmt.Sprintf("\n\n%s\n%s", m.textInput.View(), m.status)
-	return b.String() + footer
+func (m Model) renderFooter() string {
+	help := "Use arrow keys or mouse to scroll | (i) to input command | (q) to quit"
+	if m.textInput.Focused() {
+		help = "Enter command and press Enter | Esc to cancel"
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.textInput.View(),
+		help,
+	)
 }
