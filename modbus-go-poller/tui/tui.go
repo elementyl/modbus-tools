@@ -5,6 +5,7 @@ import (
 	"log"
 	"modbus-tools/modbus-go-poller/config"
 	"modbus-tools/modbus-go-poller/poller"
+	"modbus-tools/modbus-go-poller/version"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// --- STYLES ---
+// --- STYLES (Final Polished Version) ---
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -33,12 +34,16 @@ var (
 	alarmCritStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	alarmWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
 
-	changedStyle      = lipgloss.NewStyle().Background(lipgloss.Color("202")).Foreground(lipgloss.Color("0"))
-	pointNameStyle    = lipgloss.NewStyle().Width(28)
-	pointAddressStyle = lipgloss.NewStyle().Width(10).Align(lipgloss.Right)
-	pointRawStyle     = lipgloss.NewStyle().Width(12).Align(lipgloss.Right)
-	pointValueStyle   = lipgloss.NewStyle().Width(20).Align(lipgloss.Right)
-	pointUnitStyle    = lipgloss.NewStyle().Width(10)
+	changedStyle = lipgloss.NewStyle().Background(lipgloss.Color("202")).Foreground(lipgloss.Color("0"))
+
+	// Column styles with padding for separation
+	pointNameStyle    = lipgloss.NewStyle().Width(28).Padding(0, 1)
+	pointAcronymStyle = lipgloss.NewStyle().Width(22).Padding(0, 1)
+	rtuAddressStyle   = lipgloss.NewStyle().Width(11).Align(lipgloss.Right).Padding(0, 1)
+	pointAddressStyle = lipgloss.NewStyle().Width(11).Align(lipgloss.Right).Padding(0, 1)
+	pointRawStyle     = lipgloss.NewStyle().Width(11).Align(lipgloss.Right).Padding(0, 1)
+	pointValueStyle   = lipgloss.NewStyle().Width(22).Align(lipgloss.Right).Padding(0, 1)
+	pointUnitStyle    = lipgloss.NewStyle().Width(10).Padding(0, 1)
 )
 
 // --- MODEL ---
@@ -51,24 +56,22 @@ type Model struct {
 	textInput      textinput.Model
 	ready          bool
 	lastDataRender string
-	lastChange     map[uint16]time.Time
 }
 
 func NewModel(ps *poller.PollerState, logger *log.Logger) Model {
 	ti := textinput.New()
-	ti.Placeholder = "set \"Point Name\" | write 40001 4 | write \"Point Name\" 25.5"
+	ti.Placeholder = "set PW1-START | write 40003 28 | write PW1-TANK-SP 25.5"
 	ti.Focus()
 
 	return Model{
-		state:      ps,
-		log:        logger,
-		textInput:  ti,
-		lastChange: make(map[uint16]time.Time),
+		state:     ps,
+		log:       logger,
+		textInput: ti,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(250 * time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -86,7 +89,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.Type {
 			case tea.KeyEnter:
 				m.handleCommand()
-				return m, nil // Keep text input focused
+				return m, nil
 			case tea.KeyCtrlC, tea.KeyEsc:
 				m.textInput.Blur()
 				return m, nil
@@ -102,7 +105,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		topPaneHeight := 8
+		// Layout constants
+		topPaneHeight := 10    // The height of the panes (8) + borders (2)
 		txRxPaneHeight := 4
 		footerHeight := 3
 		verticalMargin := topPaneHeight + txRxPaneHeight + footerHeight
@@ -139,7 +143,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleCommand() {
 	input := strings.TrimSpace(m.textInput.Value())
-	defer m.textInput.SetValue("") // Clear input after every command
+	defer m.textInput.SetValue("")
 	if input == "" {
 		return
 	}
@@ -171,22 +175,23 @@ func (m *Model) handleCommand() {
 	switch command {
 	case "set", "s", "clear", "c":
 		if len(parts) < 2 {
-			m.state.SetStatus("Error: command requires a point name.")
+			m.state.SetStatus("Error: command requires an acronym.")
 			return
 		}
-		pointName := parts[1]
-		pointDef, found := m.state.Config.PointsByName[pointName]
-		if !found {
-			m.state.SetStatus(fmt.Sprintf("Error: Point '%s' not found.", pointName))
+		target := parts[1]
+		points, found := m.state.Config.PointsByAcronym[strings.ToUpper(target)]
+		if !found || len(points) == 0 {
+			m.state.SetStatus(fmt.Sprintf("Error: Acronym '%s' not found.", target))
 			return
 		}
+		pointDef := points[0]
 		if pointDef.Type != "bitmap" {
-			m.state.SetStatus(fmt.Sprintf("Error: Point '%s' is not a bitmap point.", pointName))
+			m.state.SetStatus(fmt.Sprintf("Error: Acronym '%s' is not a bitmap point.", target))
 			return
 		}
 		isSet := (command == "set" || command == "s")
 		m.state.SendCommand(poller.SetBitCmd{Addr: pointDef.Address, Bit: *pointDef.Bit, Val: isSet})
-		m.state.SetStatus(fmt.Sprintf("Queued %s \"%s\"", command, pointName))
+		m.state.SetStatus(fmt.Sprintf("Queued %s %s", command, target))
 
 	case "write", "w":
 		if len(parts) < 3 {
@@ -199,20 +204,19 @@ func (m *Model) handleCommand() {
 		var addr uint16
 		var pointDef *config.PointDefinition
 
-		addr64, err := strconv.ParseUint(target, 10, 16)
-		if err == nil {
+		if pds, found := m.state.Config.PointsByAcronym[strings.ToUpper(target)]; found {
+			pointDef = pds[0]
+			addr = pointDef.Address
+		} else {
+			addr64, err := strconv.ParseUint(target, 10, 16)
+			if err != nil {
+				m.state.SetStatus(fmt.Sprintf("Error: Target '%s' not found.", target))
+				return
+			}
 			addr = uint16(addr64)
 			if pds, ok := m.state.Config.PointsByAddress[addr]; ok {
 				pointDef = pds[0]
 			}
-		} else {
-			pd, found := m.state.Config.PointsByName[target]
-			if !found {
-				m.state.SetStatus(fmt.Sprintf("Error: Point name '%s' not found.", target))
-				return
-			}
-			pointDef = pd
-			addr = pd.Address
 		}
 
 		valFloat, err := strconv.ParseFloat(valueStr, 64)
@@ -223,11 +227,11 @@ func (m *Model) handleCommand() {
 
 		m.state.SendCommand(poller.WriteEngCmd{Addr: addr, EngVal: valFloat})
 
-		pointName := fmt.Sprintf("Register %d", addr)
-		if pointDef != nil {
-			pointName = pointDef.PointName
+		displayName := target
+		if pointDef != nil && pointDef.Acronym != "" {
+			displayName = pointDef.Acronym
 		}
-		m.state.SetStatus(fmt.Sprintf("Queued write to %s.", pointName))
+		m.state.SetStatus(fmt.Sprintf("Queued write to %s.", displayName))
 	default:
 		m.state.SetStatus(fmt.Sprintf("Error: Unknown command '%s'.", command))
 	}
@@ -252,7 +256,7 @@ func (m Model) View() string {
 }
 
 func (m Model) renderAlarmsPane() string {
-	_, _, alarms, _, _, _, _ := m.state.GetSnapshot()
+	_, _, _, alarms, _, _, _, _ := m.state.GetSnapshot()
 	var content strings.Builder
 	content.WriteString(titleStyle.Render("Active Alarms") + "\n")
 	if len(alarms) == 0 {
@@ -272,32 +276,48 @@ func (m Model) renderAlarmsPane() string {
 			content.WriteString(style.Render(fmt.Sprintf("[%s] %s", alarm.Severity, alarm.Message)) + "\n")
 		}
 	}
-	return baseStyle.Width(m.viewport.Width/2 - 2).Height(6).Render(content.String())
+	// Give this pane roughly half the screen width
+	paneWidth := m.viewport.Width / 2
+	return baseStyle.Width(paneWidth).Height(8).Render(content.String())
 }
 
+// In tui.go
 func (m Model) renderStatusPane() string {
-	_, _, _, tx, rx, timing, status := m.state.GetSnapshot()
+	_, _, _, _, tx, rx, timing, status := m.state.GetSnapshot()
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Status & Timing"),
-		statusKeyStyle.Render("Status: ")+status,
+		statusKeyStyle.Render("Version:  ")+version.Version,
 		statusKeyStyle.Render("Last RTT: ")+fmt.Sprintf("%.2f ms", timing.RoundTripTimeMs),
 		statusKeyStyle.Render("TX Count: ")+fmt.Sprintf("%d", tx.Count),
 		statusKeyStyle.Render("RX Count: ")+fmt.Sprintf("%d", rx.Count),
+		" ",
+		statusKeyStyle.Render("Status:"),
+		status,
 	)
-	return baseStyle.Width(m.viewport.Width/2 - 2).Height(6).Render(content)
+
+	// --- THIS IS THE CORRECTED WIDTH CALCULATION ---
+	// Calculate the width of the left pane
+	leftPaneWidth := m.viewport.Width / 2
+
+	// The width of this pane is the total width minus the left pane's width,
+	// minus 4 characters for borders and spacing.
+	rightPaneWidth := m.viewport.Width - leftPaneWidth - 4
+
+	return baseStyle.Width(rightPaneWidth).Height(8).Render(content)
 }
 
 func (m Model) renderTxRxPane() string {
-	_, _, _, tx, rx, _, _ := m.state.GetSnapshot()
+	_, _, _, _, tx, rx, _, _ := m.state.GetSnapshot()
 	var content strings.Builder
 	content.WriteString(titleStyle.Render("Last Transaction (Hex)") + "\n")
 	content.WriteString(fmt.Sprintf("TX [%d]: [%s] %s", tx.Count, tx.Timestamp, tx.Hex) + "\n")
 	content.WriteString(fmt.Sprintf("RX [%d]: [%s] %s", rx.Count, rx.Timestamp, rx.Hex))
-	return baseStyle.Render(content.String())
+	return baseStyle.Width(m.viewport.Width - 2).Render(content.String())
 }
 
 func (m Model) renderDataPane() string {
-	datastore, prevData, _, _, _, _, _ := m.state.GetSnapshot()
+	datastore, _, lastChange, _, _, _, _, _ := m.state.GetSnapshot()
+
 	var sortedAddresses []uint16
 	for addr := range m.state.Config.PointsByAddress {
 		sortedAddresses = append(sortedAddresses, addr)
@@ -309,21 +329,21 @@ func (m Model) renderDataPane() string {
 		isSecondaryReg[40009] = true
 	}
 
-	for _, addr := range sortedAddresses {
-		if datastore[addr] != prevData[addr] {
-			m.lastChange[addr] = time.Now()
-		}
+	excludeHighlight := map[string]bool{
+		"PW1-HBEAT": true,
 	}
 
 	var content strings.Builder
 	header := lipgloss.JoinHorizontal(lipgloss.Left,
 		pointNameStyle.Render("Point Name"),
-		pointAddressStyle.Render("Address"),
+		pointAcronymStyle.Render("Acronym"),
+		rtuAddressStyle.Render("RTU Addr"),
+		pointAddressStyle.Render("Modbus Addr"),
 		pointRawStyle.Render("Raw Value"),
 		pointValueStyle.Render("Value"),
 		pointUnitStyle.Render("Unit"),
 	)
-	content.WriteString(titleStyle.Render(header) + "\n")
+	content.WriteString(titleStyle.Width(m.viewport.Width).Render(header) + "\n")
 
 	for _, addr := range sortedAddresses {
 		if isSecondaryReg[addr] {
@@ -331,36 +351,51 @@ func (m Model) renderDataPane() string {
 		}
 		pointDefs, _ := m.state.Config.PointsByAddress[addr]
 		currentVal := datastore[addr]
+		pd := pointDefs[0]
 		style := lipgloss.NewStyle()
-		if time.Since(m.lastChange[addr]) < 2*time.Second {
+		if !excludeHighlight[pd.Acronym] && time.Since(lastChange[addr]) < 3*time.Second {
 			style = changedStyle
 		}
 
-		if pointDefs[0].Type == "bitmap" {
+		if pd.Type == "bitmap" {
 			line := lipgloss.JoinHorizontal(lipgloss.Left,
 				pointNameStyle.Render(fmt.Sprintf("Reg %d (Bitmap)", addr)),
-				pointAddressStyle.Render(""),
+				pointAcronymStyle.Render(""),
+				rtuAddressStyle.Render(""),
+				pointAddressStyle.Render(fmt.Sprintf("%d", addr)),
 				pointRawStyle.Render(fmt.Sprintf("%d", currentVal)),
 				pointValueStyle.Render(fmt.Sprintf("(%016b)", currentVal)),
+				pointUnitStyle.Render(""),
 			)
 			content.WriteString(style.Render(line) + "\n")
+
 			sort.Slice(pointDefs, func(i, j int) bool { return *pointDefs[i].Bit < *pointDefs[j].Bit })
-			for _, pd := range pointDefs {
-				isSet := (currentVal>>*pd.Bit)&1 == 1
-				stateText := pd.StateOff
+			for _, bitPd := range pointDefs {
+				isSet := (currentVal>>*bitPd.Bit)&1 == 1
+				stateText := bitPd.StateOff
 				if isSet {
-					stateText = pd.StateOn
+					stateText = bitPd.StateOn
+				}
+				var bitVal int
+				if isSet {
+					bitVal = 1
+				}
+				bitStyle := lipgloss.NewStyle()
+				if !excludeHighlight[bitPd.Acronym] && time.Since(lastChange[addr]) < 3*time.Second {
+					bitStyle = changedStyle
 				}
 				bitLine := lipgloss.JoinHorizontal(lipgloss.Left,
-					pointNameStyle.Render("  "+pd.PointName),
-					pointAddressStyle.Render(fmt.Sprintf(".../%d", *pd.Bit)),
-					pointRawStyle.Render(""),
+					pointNameStyle.Render("  "+bitPd.PointName),
+					pointAcronymStyle.Render(bitPd.Acronym),
+					rtuAddressStyle.Render(fmt.Sprintf("%s %d", bitPd.IOType, bitPd.IONumber)),
+					pointAddressStyle.Render(fmt.Sprintf(".../%d", *bitPd.Bit)),
+					pointRawStyle.Render(fmt.Sprintf("%d", bitVal)),
 					pointValueStyle.Render(stateText),
+					pointUnitStyle.Render(""),
 				)
-				content.WriteString(style.Render(bitLine) + "\n")
+				content.WriteString(bitStyle.Render(bitLine) + "\n")
 			}
 		} else { // analog
-			pd := pointDefs[0]
 			var valStr, addrStr, rawStr string
 			if pd.DataType == "signed" {
 				rawStr = fmt.Sprintf("%d", int16(currentVal))
@@ -372,7 +407,7 @@ func (m Model) renderDataPane() string {
 				lowWord, _ := datastore[40009]
 				unixTime := (uint32(highWord) << 16) | uint32(lowWord)
 				t := time.Unix(int64(unixTime), 0)
-				valStr = t.UTC().Format("15:04:05 UTC")
+				valStr = t.Local().Format("2006-01-02 15:04:05")
 				addrStr = "40008-9"
 				rawStr = fmt.Sprintf("%d", unixTime)
 			} else {
@@ -382,6 +417,8 @@ func (m Model) renderDataPane() string {
 			}
 			line := lipgloss.JoinHorizontal(lipgloss.Left,
 				pointNameStyle.Render(pd.PointName),
+				pointAcronymStyle.Render(pd.Acronym),
+				rtuAddressStyle.Render(fmt.Sprintf("%s %d", pd.IOType, pd.IONumber)),
 				pointAddressStyle.Render(addrStr),
 				pointRawStyle.Render(rawStr),
 				pointValueStyle.Render(valStr),

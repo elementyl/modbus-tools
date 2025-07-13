@@ -27,6 +27,7 @@ type PollerState struct {
 	Config            *config.AppConfig
 	CurrentRegisters  map[uint16]uint16
 	PreviousRegisters map[uint16]uint16
+	LastChange        map[uint16]time.Time // Authoritative change times
 	ActiveAlarms      map[string]ActiveAlarm
 	LastTx            TxRxInfo
 	LastRx            TxRxInfo
@@ -43,6 +44,7 @@ func NewPollerState(dbEventChan chan<- database.Event, appConfig *config.AppConf
 		Config:            appConfig,
 		CurrentRegisters:  make(map[uint16]uint16),
 		PreviousRegisters: make(map[uint16]uint16),
+		LastChange:        make(map[uint16]time.Time), // Initialize the map
 		ActiveAlarms:      make(map[string]ActiveAlarm),
 		Status:            "Initializing...",
 		CommandChan:       make(chan interface{}, 10),
@@ -67,7 +69,7 @@ func (ps *PollerState) UpdateHeartbeat(high, low uint16, t uint32) {
 	ps.lastHeartbeatTime = t
 }
 
-func (ps *PollerState) GetSnapshot() (map[uint16]uint16, map[uint16]uint16, map[string]ActiveAlarm, TxRxInfo, TxRxInfo, TimingInfo, string) {
+func (ps *PollerState) GetSnapshot() (map[uint16]uint16, map[uint16]uint16, map[uint16]time.Time, map[string]ActiveAlarm, TxRxInfo, TxRxInfo, TimingInfo, string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	current := make(map[uint16]uint16)
@@ -78,11 +80,15 @@ func (ps *PollerState) GetSnapshot() (map[uint16]uint16, map[uint16]uint16, map[
 	for k, v := range ps.PreviousRegisters {
 		previous[k] = v
 	}
+	lastChange := make(map[uint16]time.Time)
+	for k, v := range ps.LastChange {
+		lastChange[k] = v
+	}
 	alarms := make(map[string]ActiveAlarm)
 	for k, v := range ps.ActiveAlarms {
 		alarms[k] = v
 	}
-	return current, previous, alarms, ps.LastTx, ps.LastRx, ps.Timing, ps.Status
+	return current, previous, lastChange, alarms, ps.LastTx, ps.LastRx, ps.Timing, ps.Status
 }
 
 func (ps *PollerState) UpdateFromPoll(newData map[uint16]uint16) {

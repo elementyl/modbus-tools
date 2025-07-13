@@ -10,6 +10,7 @@ import (
 	"modbus-tools/modbus-go-poller/database"
 	"modbus-tools/modbus-go-poller/poller"
 	"modbus-tools/modbus-go-poller/tui"
+	"modbus-tools/modbus-go-poller/version"
 	"os"
 	"os/signal"
 	"sync"
@@ -20,6 +21,7 @@ import (
 )
 
 func main() {
+	log.Printf("--- Starting modbus-go-poller Version: %s (Build Date: %s) ---", version.Version, version.BuildDate)
 	// --- Argument Parsing ---
 	mode := flag.String("mode", "tcp", "Connection mode: 'tcp' or 'serial'")
 	targetTCP := flag.String("target-tcp", fmt.Sprintf("%s:%d", config.DefaultTCPServerHost, config.DefaultTCPServerPort), "TCP target address (e.g., 127.0.0.1:5020)")

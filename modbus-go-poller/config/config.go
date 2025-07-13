@@ -6,8 +6,13 @@ type PollGroup struct {
 	Count        uint16
 }
 
+// In modbus-go-poller/config/config.go
+
 type PointDefinition struct {
 	PointName   string
+	Acronym     string // NEW
+	IOType      string // NEW
+	IONumber    int    // NEW
 	Address     uint16
 	Bit         *uint
 	Type        string
@@ -35,6 +40,7 @@ type AlarmDefinition struct {
 type AppConfig struct {
 	PointsByAddress map[uint16][]*PointDefinition
 	PointsByName    map[string]*PointDefinition
+	PointsByAcronym map[string][]*PointDefinition
 	AlarmsByPoint   map[string][]*AlarmDefinition
 }
 

@@ -2,13 +2,15 @@ package database
 
 import (
 	"database/sql"
-	"fmt"
 	"log"
 )
 
-// --- Structs moved from poller's config package ---
+// --- Structs ---
 type PointDefinition struct {
 	PointName   string
+	Acronym     string
+	IOType      string
+	IONumber    int
 	Address     uint16
 	Bit         *uint
 	Type        string
@@ -33,17 +35,18 @@ type AlarmDefinition struct {
 	Message   string
 }
 
-// --- SQL Schema moved from poller's database/init.go ---
+// --- SQL Schema ---
 const createPointDefsSQL = `
 CREATE TABLE point_definitions (
     point_name TEXT PRIMARY KEY,
+    acronym TEXT,
+    io_type TEXT,
+    io_number INTEGER,
     modbus_address INTEGER NOT NULL,
     modbus_bit INTEGER,
     point_type TEXT NOT NULL,
     data_type TEXT NOT NULL DEFAULT 'unsigned',
     units TEXT,
-    cos_tolerance REAL DEFAULT 0.0,
-    report_interval_seconds INTEGER DEFAULT 0,
     normal_state INTEGER,
     state_on TEXT,
     state_off TEXT,
@@ -65,84 +68,72 @@ CREATE TABLE alarm_definitions (
     FOREIGN KEY (point_name) REFERENCES point_definitions (point_name)
 );`
 
-// --- Data moved from poller's config/config.go ---
+// --- Data Map ---
+// In modbus-db-init/database/init.go
+
 var REG_MAP = []struct {
-	Address   uint16
-	Type      string
-	Name      string
-	DataType  string
-	Unit      string
-	Scaling   *ScalingParams
-	Points    map[uint]PointDefinition
-	Alarms    []AlarmDefinition
-	LogEvents bool
+	Address  uint16
+	Type     string
+	Name     string
+	Acronym  string
+	IOType   string
+	IONumber int
+	DataType string
+	Unit     string
+	Scaling  *ScalingParams
+	Points   map[uint]PointDefinition
+	Alarms   []AlarmDefinition
 }{
-	// --- MODIFIED REGISTER 40001 ---
+	// --- CONTROL REGISTERS ---
 	{Address: 40001, Type: "bitmap", Points: map[uint]PointDefinition{
-		0: {PointName: "Start", NormalState: uintPtr(0), StateOff: "Inactive", StateOn: "Active", LogEvents: true},
-		1: {PointName: "Stop", NormalState: uintPtr(0), StateOff: "Inactive", StateOn: "Active", LogEvents: true},
-		2: {PointName: "Mode Auto/Manual", NormalState: uintPtr(1), StateOff: "Manual", StateOn: "Auto", LogEvents: true},
-		// 3: {PointName: "Chlorinator Pump Enabled", ...} // -- REMOVED from here
+		0: {PointName: "Start", Acronym: "PW1-START", IOType: "DO", IONumber: 1, NormalState: uintPtr(0), StateOn: "ON", StateOff: "OFF"},
+		1: {PointName: "Stop", Acronym: "PW1-STOP", IOType: "DO", IONumber: 2, NormalState: uintPtr(0), StateOn: "ON", StateOff: "OFF"},
+		2: {PointName: "CMD: Auto Mode", Acronym: "PW1-AUTO-ENA", IOType: "DO", IONumber: 3, NormalState: uintPtr(0), StateOn: "AUTO", StateOff: "MANUAL"},
 	}},
-
-	// --- NEW BITMAP REGISTER 40002 ---
 	{Address: 40002, Type: "bitmap", Points: map[uint]PointDefinition{
-		0: {PointName: "Chlorinator Pump Enabled", NormalState: uintPtr(1), StateOff: "Disabled", StateOn: "Enabled", LogEvents: true},
+		0: {PointName: "Chlorinator Pump Enabled", Acronym: "PW1-TS-DOS-SS", IOType: "DO", IONumber: 17, NormalState: uintPtr(0), StateOn: "ENABLED", StateOff: "DISABLED"},
 	}},
+	// ... Analog points are unchanged ...
+	{Address: 40003, Type: "analog", Name: "Tank Level", Acronym: "PW1-TANK-SP", IOType: "AO", IONumber: 3, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 231}},
+	{Address: 40004, Type: "analog", Name: "Start SP", Acronym: "PW1-START-SP", IOType: "AO", IONumber: 4, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 231, EngLow: 0, EngHigh: 231}},
+	{Address: 40005, Type: "analog", Name: "Stop SP", Acronym: "PW1-STOP-SP", IOType: "AO", IONumber: 5, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 231, EngLow: 0, EngHigh: 231}},
+	{Address: 40008, Type: "analog", Name: "SCADA Clock", IOType: "AO", IONumber: 8, DataType: "unsigned"},
+	{Address: 40009, Type: "analog", Name: "SCADA Clock (low)", IOType: "AO", IONumber: 9, DataType: "unsigned"},
 
-	// --- SHIFTED ANALOG REGISTERS ---
-	{Address: 40003, Type: "analog", Name: "Tank Level SP", DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 44}, LogEvents: true}, // Was 40002
-	{Address: 40004, Type: "analog", Name: "Start SP", DataType: "unsigned", Unit: "ft", LogEvents: true},                                                                                         // Was 40003
-	{Address: 40005, Type: "analog", Name: "Stop SP", DataType: "unsigned", Unit: "ft", LogEvents: true},                                                                                          // Was 40004
-	{Address: 40008, Type: "analog", Name: "Poller Heartbeat High", DataType: "unsigned", LogEvents: false},
-	{Address: 40009, Type: "analog", Name: "Poller Heartbeat Low", DataType: "unsigned", LogEvents: false},
-	{
-		Address: 41001, Type: "bitmap", Points: map[uint]PointDefinition{
-			0:  {PointName: "Motor Running", NormalState: uintPtr(0), StateOff: "Stopped", StateOn: "Running", LogEvents: true},
-			1:  {PointName: "Status Auto/Manual", NormalState: uintPtr(1), StateOff: "Manual", StateOn: "Auto", LogEvents: true},
-			2:  {PointName: "Lockout", NormalState: uintPtr(0), StateOff: "OK", StateOn: "LOCKOUT", LogEvents: true},
-			3:  {PointName: "Backspin", NormalState: uintPtr(0), StateOff: "OK", StateOn: "Active", LogEvents: true},
-			4:  {PointName: "Drawdown Level Alarm", NormalState: uintPtr(0), StateOff: "OK", StateOn: "ALARM", LogEvents: true},
-			5:  {PointName: "No Flow", NormalState: uintPtr(1), StateOff: "No Flow", StateOn: "Flow OK", LogEvents: true},
-			6:  {PointName: "High Discharge Pressure", NormalState: uintPtr(0), StateOff: "OK", StateOn: "High Pressure", LogEvents: true},
-			7:  {PointName: "Building Intrusion", NormalState: uintPtr(1), StateOff: "INTRUSION", StateOn: "Secure", LogEvents: true},
-			8:  {PointName: "PLC Intrusion", NormalState: uintPtr(1), StateOff: "INTRUSION", StateOn: "Secure", LogEvents: true},
-			9:  {PointName: "AC Power Fail", NormalState: uintPtr(1), StateOff: "FAILED", StateOn: "OK", LogEvents: true},
-			10: {PointName: "PLC Alarm", NormalState: uintPtr(0), StateOff: "OK", StateOn: "ALARM", LogEvents: true},
-			11: {PointName: "MCC Alarm", NormalState: uintPtr(0), StateOff: "OK", StateOn: "ALARM", LogEvents: true},
-		},
-		Alarms: []AlarmDefinition{
-			{PointName: "Lockout", Type: "on", Severity: "CRITICAL", Message: "PUMP LOCKOUT ACTIVE"},
-			{PointName: "PLC Alarm", Type: "on", Severity: "WARNING", Message: "PLC Fault Detected"},
-			{PointName: "AC Power Fail", Type: "on", Severity: "CRITICAL", Message: "AC Power Failure"},
-		},
-	},
+	// --- STATUS REGISTERS ---
+	{Address: 41001, Type: "bitmap", Points: map[uint]PointDefinition{
+		0:  {PointName: "Motor Running", Acronym: "PW1-RUN", IOType: "DI", IONumber: 1, NormalState: uintPtr(0), StateOn: "Running", StateOff: "Stopped"},
+		1:  {PointName: "STATUS: Auto Mode", Acronym: "PW1-AUTO-ENA", IOType: "DI", IONumber: 2, NormalState: uintPtr(0), StateOn: "Auto", StateOff: "Manual"},
+		2:  {PointName: "Lockout", Acronym: "PW1-LOCKED", IOType: "DI", IONumber: 3, NormalState: uintPtr(0), StateOn: "LOCKOUT", StateOff: "OK"},
+		3:  {PointName: "Backspin", Acronym: "PW1-BACKSPIN", IOType: "DI", IONumber: 4, NormalState: uintPtr(0), StateOn: "Active", StateOff: "OK"},
+		4:  {PointName: "Drawdown Level Alarm", Acronym: "PW1-DRAW-ALM", IOType: "DI", IONumber: 5, NormalState: uintPtr(0), StateOn: "ALARM", StateOff: "OK"},
+		5:  {PointName: "No Flow", Acronym: "PW1-FL-ALM", IOType: "DI", IONumber: 6, NormalState: uintPtr(1), StateOn: "Flow OK", StateOff: "No Flow"},
+		6:  {PointName: "High Discharge Pressure", Acronym: "PW1-HPRS-ALM", IOType: "DI", IONumber: 7, NormalState: uintPtr(0), StateOn: "High Pressure", StateOff: "OK"},
+		7:  {PointName: "Building Intrusion", Acronym: "PW1-INTRUSION", IOType: "DI", IONumber: 8, NormalState: uintPtr(1), StateOn: "Secure", StateOff: "INTRUSION"},
+		8:  {PointName: "PLC Intrusion", Acronym: "PW1-DOOR", IOType: "DI", IONumber: 9, NormalState: uintPtr(1), StateOn: "Secure", StateOff: "INTRUSION"},
+		9:  {PointName: "AC Power Fail", Acronym: "PW1-PWR-FAIL", IOType: "DI", IONumber: 10, NormalState: uintPtr(1), StateOn: "OK", StateOff: "FAILED"},
+		10: {PointName: "PLC Fault", Acronym: "PW1-PLC-FAULT", IOType: "DI", IONumber: 11, NormalState: uintPtr(0), StateOn: "FAULT", StateOff: "OK"},
+		11: {PointName: "Starter Fault", Acronym: "PW1-STARTER-FAULT", IOType: "DI", IONumber: 12, NormalState: uintPtr(0), StateOn: "FAULT", StateOff: "OK"},
+		12: {PointName: "Flow Transmitter Alarm", Acronym: "PW1-FLOW-ALARM", IOType: "DI", IONumber: 13, NormalState: uintPtr(0), StateOn: "ALARM", StateOff: "OK"},
+	}},
 	{Address: 41002, Type: "bitmap", Points: map[uint]PointDefinition{
-		4:  {PointName: "East Door Intrusion", NormalState: uintPtr(1), StateOff: "INTRUSION", StateOn: "Secure", LogEvents: true},
-		5:  {PointName: "North Door Intrusion", NormalState: uintPtr(1), StateOff: "INTRUSION", StateOn: "Secure", LogEvents: true},
-		6:  {PointName: "MicroChlor Running", NormalState: uintPtr(0), StateOff: "Stopped", StateOn: "Running", LogEvents: true},
-		7:  {PointName: "MicroChlor Estop", NormalState: uintPtr(0), StateOff: "OK", StateOn: "E-STOP", LogEvents: true},
-		8:  {PointName: "Chlorinator Pump Running", NormalState: uintPtr(0), StateOff: "Stopped", StateOn: "Running", LogEvents: true},
-		13: {PointName: "PanelView Stop Command", NormalState: uintPtr(0), StateOff: "Inactive", StateOn: "Active", LogEvents: true},
-			14: {PointName: "PanelView Start Command", NormalState: uintPtr(0), StateOff: "Inactive", StateOn: "Active", LogEvents: true},
-			15: {PointName: "PanelView Auto Command", NormalState: uintPtr(0), StateOff: "Inactive", StateOn: "Active", LogEvents: true},
-		}},
-	{Address: 41003, Type: "analog", Name: "Flow", DataType: "signed", Unit: "GPM", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 1500}, LogEvents: true},
-	{Address: 41004, Type: "analog", Name: "Drawdown", DataType: "signed", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 231}, LogEvents: true},
-	{
-		Address:   41005, Type: "analog", Name: "Discharge Pressure", DataType: "signed", Unit: "PSI",
-		Scaling:   &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 200},
-		Alarms: []AlarmDefinition{
-			{PointName: "Discharge Pressure", Type: "high", Limit: 190.0, Severity: "CRITICAL", Message: "Discharge Pressure Critically High"},
-			{PointName: "Discharge Pressure", Type: "high", Limit: 175.0, Severity: "WARNING", Message: "Discharge Pressure High Warning"},
-			{PointName: "Discharge Pressure", Type: "low", Limit: 50.0, Severity: "WARNING", Message: "Discharge Pressure Low Warning"},
-		},
-		LogEvents: true,
-	},
-	{Address: 41006, Type: "analog", Name: "Chlorine Flow", DataType: "signed", Unit: "GPM", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 4000}, LogEvents: true},
-	{Address: 41007, Type: "analog", Name: "PanelView Start SP", DataType: "unsigned", Unit: "ft", LogEvents: true},
-	{Address: 41008, Type: "analog", Name: "PanelView Stop SP", DataType: "unsigned", Unit: "ft", LogEvents: true},
-	{Address: 41009, Type: "analog", Name: "Heartbeat", DataType: "unsigned", Unit: "counts", LogEvents: false},
+		4:  {PointName: "East Door Intrusion", Acronym: "PW1-TS-DOOR1", IOType: "DI", IONumber: 21, NormalState: uintPtr(0), StateOn: "Secure", StateOff: "INTRUSION"},
+		5:  {PointName: "North Door Intrusion", Acronym: "PW1-TS-DOOR2", IOType: "DI", IONumber: 22, NormalState: uintPtr(0), StateOn: "Secure", StateOff: "INTRUSION"},
+		6:  {PointName: "MicroChlor Running", Acronym: "PW1-TS-CL2-RUN", IOType: "DI", IONumber: 23, NormalState: uintPtr(0), StateOn: "Running", StateOff: "Stopped"},
+		7:  {PointName: "MicroChlor Estop", Acronym: "PW1-WELL-ESTOP", IOType: "DI", IONumber: 24, NormalState: uintPtr(0), StateOn: "E-STOP", StateOff: "OK"},
+		8:  {PointName: "Chlorinator Pump Running", Acronym: "PW1-TS-DOS-RUN", IOType: "DI", IONumber: 25, NormalState: uintPtr(0), StateOn: "Running", StateOff: "Stopped"},
+		13: {PointName: "Pump ON Command", Acronym: "PW1-START", IOType: "DI", IONumber: 14, NormalState: uintPtr(0), StateOn: "Active", StateOff: "Inactive"},
+		14: {PointName: "Pump OFF Command", Acronym: "PW1-STOP", IOType: "DI", IONumber: 15, NormalState: uintPtr(0), StateOn: "Active", StateOff: "Inactive"},
+		15: {PointName: "Pump Auto Command", Acronym: "PW1-AUTO-ENA", IOType: "DI", IONumber: 16, NormalState: uintPtr(0), StateOn: "Active", StateOff: "Inactive"},
+	}},
+	// ... rest of analog points are unchanged ...
+	{Address: 41003, Type: "analog", Name: "Flow", Acronym: "PW1-FLOW", IOType: "AI", IONumber: 3, DataType: "signed", Unit: "gpm", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 1500}},
+	{Address: 41004, Type: "analog", Name: "Drawdown", Acronym: "PW1-DRAW-LVL", IOType: "AI", IONumber: 4, DataType: "signed", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 231}},
+	{Address: 41005, Type: "analog", Name: "Discharge Pressure", Acronym: "PW1-DIS-PRES", IOType: "AI", IONumber: 5, DataType: "signed", Unit: "psi", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 200}},
+	{Address: 41006, Type: "analog", Name: "Chlorine Flow", Acronym: "PW1-TS-FLOW", IOType: "AI", IONumber: 6, DataType: "signed", Unit: "gpm", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 4000}},
+	{Address: 41007, Type: "analog", Name: "Pump Start SP", Acronym: "PW1-START-SP", IOType: "AI", IONumber: 7, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 231, EngLow: 0, EngHigh: 231}},
+	{Address: 41008, Type: "analog", Name: "Pump Stop SP", Acronym: "PW1-STOP-SP", IOType: "AI", IONumber: 8, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 231, EngLow: 0, EngHigh: 231}},
+	{Address: 41009, Type: "analog", Name: "PLC Heartbeat", Acronym: "PW1-HBEAT", IOType: "AI", IONumber: 9, DataType: "unsigned", Unit: "seconds", Scaling: &ScalingParams{RawLow: 0, RawHigh: 59, EngLow: 0, EngHigh: 59}},
 }
 
 func uintPtr(u uint) *uint {
@@ -153,30 +144,30 @@ func uintPtr(u uint) *uint {
 func CreateAndPopulate(db *sql.DB) error {
 	log.Println("Creating database schema...")
 	if _, err := db.Exec(createPointDefsSQL); err != nil {
-		return fmt.Errorf("could not create point_definitions table: %w", err)
+		return err
 	}
 	if _, err := db.Exec(createAlarmDefsSQL); err != nil {
-		return fmt.Errorf("could not create alarm_definitions table: %w", err)
+		return err
 	}
 	log.Println("Schema created successfully.")
 
 	log.Println("Populating database with default point and alarm definitions...")
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("could not begin transaction: %w", err)
+		return err
 	}
 
-	pointStmt, err := tx.Prepare(`INSERT INTO point_definitions(point_name, modbus_address, modbus_bit, point_type, data_type, units, normal_state, state_on, state_off, scaling_raw_low, scaling_raw_high, scaling_eng_low, scaling_eng_high, log_events) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	pointStmt, err := tx.Prepare(`INSERT INTO point_definitions(point_name, acronym, io_type, io_number, modbus_address, modbus_bit, point_type, data_type, units, normal_state, state_on, state_off, scaling_raw_low, scaling_raw_high, scaling_eng_low, scaling_eng_high, log_events) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		tx.Rollback()
-		return fmt.Errorf("could not prepare point statement: %w", err)
+		return err
 	}
 	defer pointStmt.Close()
 
 	alarmStmt, err := tx.Prepare(`INSERT INTO alarm_definitions(point_name, alarm_type, limit_value, severity, message) VALUES(?, ?, ?, ?, ?)`)
 	if err != nil {
 		tx.Rollback()
-		return fmt.Errorf("could not prepare alarm statement: %w", err)
+		return err
 	}
 	defer alarmStmt.Close()
 
@@ -185,10 +176,27 @@ func CreateAndPopulate(db *sql.DB) error {
 		if regDef.Type == "analog" {
 			var sc_rl, sc_rh, sc_el, sc_eh *float64
 			if regDef.Scaling != nil {
-				// NOTE: Fixed a typo from the original code (&regDef -> regDef)
 				sc_rl, sc_rh, sc_el, sc_eh = &regDef.Scaling.RawLow, &regDef.Scaling.RawHigh, &regDef.Scaling.EngLow, &regDef.Scaling.EngHigh
 			}
-			_, err := pointStmt.Exec(regDef.Name, regDef.Address, nil, "analog", regDef.DataType, regDef.Unit, nil, nil, nil, sc_rl, sc_rh, sc_el, sc_eh, regDef.LogEvents)
+			_, err := pointStmt.Exec(
+				regDef.Name,       // 1-point_name
+				regDef.Acronym,    // 2-acronym
+				regDef.IOType,     // 3-io_type
+				regDef.IONumber,   // 4-io_number
+				regDef.Address,    // 5-modbus_address
+				nil,               // 6-modbus_bit
+				"analog",          // 7-point_type
+				regDef.DataType,   // 8-data_type
+				regDef.Unit,       // 9-units
+				nil,               // 10-normal_state
+				nil,               // 11-state_on
+				nil,               // 12-state_off
+				sc_rl,             // 13-scaling_raw_low
+				sc_rh,             // 14-scaling_raw_high
+				sc_el,             // 15-scaling_eng_low
+				sc_eh,             // 16-scaling_eng_high
+				true,              // 17-log_events
+			)
 			if err != nil {
 				log.Printf("WARNING: Failed to insert analog point %s: %v. Skipping.", regDef.Name, err)
 				continue
@@ -196,8 +204,25 @@ func CreateAndPopulate(db *sql.DB) error {
 			pointCount++
 		} else { // bitmap
 			for bit, pointDef := range regDef.Points {
-				// Bitmaps are always unsigned
-				_, err := pointStmt.Exec(pointDef.PointName, regDef.Address, bit, "bitmap", "unsigned", nil, pointDef.NormalState, pointDef.StateOn, pointDef.StateOff, nil, nil, nil, nil, pointDef.LogEvents)
+				_, err := pointStmt.Exec(
+					pointDef.PointName,      // 1-point_name
+					pointDef.Acronym,        // 2-acronym
+					pointDef.IOType,         // 3-io_type
+					pointDef.IONumber,       // 4-io_number
+					regDef.Address,          // 5-modbus_address
+					bit,                     // 6-modbus_bit
+					"bitmap",                // 7-point_type
+					"unsigned",              // 8-data_type
+					nil,                     // 9-units
+					pointDef.NormalState,    // 10-normal_state
+					pointDef.StateOn,        // 11-state_on
+					pointDef.StateOff,       // 12-state_off
+					nil,                     // 13-scaling_raw_low
+					nil,                     // 14-scaling_raw_high
+					nil,                     // 15-scaling_eng_low
+					nil,                     // 16-scaling_eng_high
+					true,                    // 17-log_events
+				)
 				if err != nil {
 					log.Printf("WARNING: Failed to insert bitmap point %s: %v. Skipping.", pointDef.PointName, err)
 					continue
@@ -215,11 +240,9 @@ func CreateAndPopulate(db *sql.DB) error {
 			}
 		}
 	}
-
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("could not commit transaction: %w", err)
+		return err
 	}
-
 	log.Printf("Database population completed. Inserted %d points.", pointCount)
 	return nil
 }

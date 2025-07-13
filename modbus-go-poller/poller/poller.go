@@ -141,7 +141,8 @@ func RunIO(ctx context.Context, wg *sync.WaitGroup, state *PollerState, log *log
 				}
 				switch c := cmd.(type) {
 				case SetBitCmd:
-					current, _, _, _, _, _, _ := state.GetSnapshot()
+					// FIX 1: Add underscore for the new 8th return value
+					current, _, _, _, _, _, _, _ := state.GetSnapshot()
 					currentVal := current[c.Addr]
 					var newVal uint16
 					if c.Val {
@@ -325,7 +326,8 @@ func RunStateProcessor(ctx context.Context, wg *sync.WaitGroup, state *PollerSta
 	for {
 		select {
 		case <-ticker.C:
-			current, previous, oldAlarms, _, _, _, _ := state.GetSnapshot()
+			// FIX 2: Add underscore for the new 8th return value
+			current, previous, _, oldAlarms, _, _, _, _ := state.GetSnapshot()
 			if len(current) == 0 {
 				continue
 			}
@@ -365,6 +367,13 @@ func RunStateProcessor(ctx context.Context, wg *sync.WaitGroup, state *PollerSta
 				}
 				currentVal := current[addr]
 				prevVal := previous[addr]
+
+				if currentVal != prevVal {
+					state.mu.Lock()
+					state.LastChange[addr] = changeTime
+					state.mu.Unlock()
+				}
+
 				for _, pointDef := range pointDefs {
 					if isFirstPoll {
 						if pointDef.Type == "analog" {

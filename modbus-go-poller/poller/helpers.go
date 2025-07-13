@@ -11,20 +11,26 @@ func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 	cfg := &config.AppConfig{
 		PointsByAddress: make(map[uint16][]*config.PointDefinition),
 		PointsByName:    make(map[string]*config.PointDefinition),
+		PointsByAcronym: make(map[string][]*config.PointDefinition),
 		AlarmsByPoint:   make(map[string][]*config.AlarmDefinition),
 	}
-	rows, err := db.Query("SELECT point_name, modbus_address, modbus_bit, point_type, data_type, units, normal_state, state_on, state_off, scaling_raw_low, scaling_raw_high, scaling_eng_low, scaling_eng_high, log_events FROM point_definitions")
+	rows, err := db.Query("SELECT point_name, acronym, io_type, io_number, modbus_address, modbus_bit, point_type, data_type, units, normal_state, state_on, state_off, scaling_raw_low, scaling_raw_high, scaling_eng_low, scaling_eng_high, log_events FROM point_definitions")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query point_definitions: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		p := &config.PointDefinition{}
-		var bit, normalState sql.NullInt64
-		var unit, stateOn, stateOff, dataType sql.NullString
+		var bit, normalState, ioNum sql.NullInt64
+		var acronym, ioType, unit, stateOn, stateOff, dataType sql.NullString
 		var sc_rl, sc_rh, sc_el, sc_eh sql.NullFloat64
-		if err := rows.Scan(&p.PointName, &p.Address, &bit, &p.Type, &dataType, &unit, &normalState, &stateOn, &stateOff, &sc_rl, &sc_rh, &sc_el, &sc_eh, &p.LogEvents); err != nil {
+		if err := rows.Scan(&p.PointName, &acronym, &ioType, &ioNum, &p.Address, &bit, &p.Type, &dataType, &unit, &normalState, &stateOn, &stateOff, &sc_rl, &sc_rh, &sc_el, &sc_eh, &p.LogEvents); err != nil {
 			return nil, err
+		}
+		p.Acronym = acronym.String
+		p.IOType = ioType.String
+		if ioNum.Valid {
+			p.IONumber = int(ioNum.Int64)
 		}
 		p.DataType = dataType.String
 		if bit.Valid {
@@ -48,6 +54,9 @@ func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 		}
 		cfg.PointsByAddress[p.Address] = append(cfg.PointsByAddress[p.Address], p)
 		cfg.PointsByName[p.PointName] = p
+		if p.Acronym != "" {
+			cfg.PointsByAcronym[p.Acronym] = append(cfg.PointsByAcronym[p.Acronym], p)
+		}
 	}
 	rows.Close()
 	rows, err = db.Query("SELECT point_name, alarm_type, limit_value, severity, message FROM alarm_definitions")
@@ -91,7 +100,7 @@ func ScaleValue(rawVal uint16, p *config.PointDefinition) float64 {
 }
 
 func UnscaleValue(engVal float64, p *config.PointDefinition) uint16 {
-	if p.Scaling == nil {
+	if p == nil || p.Scaling == nil {
 		return uint16(engVal)
 	}
 	s := p.Scaling
