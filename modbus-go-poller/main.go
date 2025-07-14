@@ -1,3 +1,4 @@
+// ===== C:\Projects\modbus-tools\modbus-go-poller\main.go =====
 package main
 
 import (
@@ -22,7 +23,6 @@ import (
 
 func main() {
 	log.Printf("--- Starting modbus-go-poller Version: %s (Build Date: %s) ---", version.Version, version.BuildDate)
-	// --- Argument Parsing ---
 	mode := flag.String("mode", "tcp", "Connection mode: 'tcp' or 'serial'")
 	targetTCP := flag.String("target-tcp", fmt.Sprintf("%s:%d", config.DefaultTCPServerHost, config.DefaultTCPServerPort), "TCP target address (e.g., 127.0.0.1:5020)")
 	targetSerial := flag.String("target-serial", config.DefaultSerialPort, "Serial port (e.g., COM3 or /dev/ttyUSB0)")
@@ -39,7 +39,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- Logging Setup ---
 	soeLogFile, err := os.OpenFile("poller_events.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatalf("Failed to open SOE log file: %v", err)
@@ -54,17 +53,19 @@ func main() {
 	defer dbLogFile.Close()
 	dbLogger := log.New(dbLogFile, "DB: ", log.LstdFlags|log.Lmicroseconds)
 
-	// --- Database Initialization and Config Loading ---
+	txLogFile, err := os.OpenFile("poller_transaction.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open transaction log file: %v", err)
+	}
+	defer txLogFile.Close()
+	txLogger := log.New(txLogFile, "", log.LstdFlags|log.Lmicroseconds)
+	txLogger.Println("--- NEW SESSION ---")
+
 	dbConn, err := sql.Open("sqlite", *dbFile)
 	if err != nil {
 		log.Fatalf("FATAL: Could not open database %s: %v", *dbFile, err)
 	}
 	defer dbConn.Close()
-
-	// The one-time migration logic has been removed. The poller now expects a fully initialized database.
-	// if err := database.InitDatabase(dbConn, dbLogger); err != nil {
-	// 	log.Fatalf("FATAL: Could not initialize database schema: %v", err)
-	// }
 
 	appConfig, err := poller.LoadConfigurationFromDB(dbConn)
 	if err != nil {
@@ -72,48 +73,43 @@ func main() {
 	}
 	log.Printf("Successfully loaded %d points from database.", len(appConfig.PointsByName))
 
-	// --- Coordinated Shutdown Setup ---
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup // Use a WaitGroup to ensure goroutines finish
+	var wg sync.WaitGroup
 
-	// --- Channel and State Initialization ---
 	dbEventChan := make(chan database.Event, 100)
-	state := poller.NewPollerState(dbEventChan, appConfig)
+	polledDataChan := make(chan map[uint16]uint16, 10)
+	ioResultChan := make(chan poller.IO_Result, 10)
+	commandPacketChan := make(chan []byte, 10) // Create the command packet channel
+	state := poller.NewPollerState(dbEventChan, ioResultChan, appConfig)
 
-	// --- Start Goroutines ---
-	wg.Add(3) // We are launching 3 long-running goroutines
-	go poller.RunIO(ctx, &wg, state, soeLogger, *mode, target)
-	go poller.RunStateProcessor(ctx, &wg, state, soeLogger)
+	wg.Add(3)
+	go poller.RunIO(ctx, &wg, state, soeLogger, txLogger, polledDataChan, commandPacketChan, *mode, target)
+	go poller.RunStateProcessor(ctx, &wg, state, soeLogger, polledDataChan, commandPacketChan)
 	go database.DatabaseWriter(ctx, &wg, dbEventChan, dbLogger)
 
-	// --- Start TUI ---
 	tuiModel := tui.NewModel(state, soeLogger)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
 
-	// This goroutine waits for the TUI to exit.
 	go func() {
 		if err := p.Start(); err != nil {
 			log.Fatalf("Alas, there's been an error: %v", err)
 		}
-		// When TUI exits for any reason, trigger the shutdown.
 		cancel()
 	}()
 
-	// --- Graceful Shutdown Handling ---
 	shutdownChan := make(chan os.Signal, 1)
 	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
 
 	select {
-	case <-shutdownChan: // Triggered by Ctrl-C
+	case <-shutdownChan:
 		log.Println("Shutdown signal received. Cleaning up.")
-		p.Quit() // This will cause the TUI goroutine to exit, which in turn calls cancel().
-	case <-ctx.Done(): // Triggered if TUI exits first
+		p.Quit()
+	case <-ctx.Done():
 		log.Println("TUI exited. Shutting down other processes.")
 	}
 
-	// Wait for all goroutines to acknowledge shutdown and finish their work.
-	log.Println("Waiting for goroutines to finish...")
+	log.Println("Waiting for producer goroutines to finish...")
 	wg.Wait()
-	log.Println("All goroutines finished. Exiting.")
-	close(dbEventChan) // Now it's safe to close the channel
+	log.Println("All goroutines finished. Closing database event channel.")
+	close(dbEventChan)
 }

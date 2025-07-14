@@ -1,12 +1,13 @@
+// ===== C:\Projects\modbus-tools\modbus-go-server\main.go =====
 package main
 
 import (
 	"flag"
 	"fmt"
 	"log"
-	"modbus-go-server/config"
-	"modbus-go-server/server"
-	"modbus-go-server/tui"
+	"modbus-tools/modbus-go-server/config"
+	"modbus-tools/modbus-go-server/server"
+	"modbus-tools/modbus-go-server/tui"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,7 +31,7 @@ func main() {
 	modbusServer := server.NewServer(logger)
 
 	go modbusServer.RunCommandProcessor()
-	go modbusServer.HeartbeatLoop() 
+	go modbusServer.HeartbeatLoop()
 
 	if *scenarioPath != "" {
 		go modbusServer.RunScenario(*scenarioPath)
@@ -45,24 +46,22 @@ func main() {
 	} else {
 		log.Fatalf("Invalid mode: %s. Choose 'tcp' or 'serial'", *mode)
 	}
-	
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
 		logger.Println("Ctrl+C detected, stopping server...")
 		modbusServer.Stop()
+		os.Exit(0)
 	}()
 
-	// --- THIS IS THE FIX ---
-	// Pass the logger to the TUI model, as required by its constructor.
 	p := tea.NewProgram(tui.NewModel(modbusServer, logger), tea.WithAltScreen())
-	// --- END OF FIX ---
-	
+
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running TUI: %v", err)
 		os.Exit(1)
 	}
-	
+
 	logger.Println("Application exiting.")
 }

@@ -1,3 +1,4 @@
+// ===== C:\Projects\modbus-tools\modbus-db-init\database\init.go =====
 package database
 
 import (
@@ -14,7 +15,7 @@ type PointDefinition struct {
 	Address     uint16
 	Bit         *uint
 	Type        string
-	DataType    string // 'unsigned' or 'signed'
+	DataType    string
 	Unit        string
 	NormalState *uint
 	StateOn     string
@@ -69,8 +70,6 @@ CREATE TABLE alarm_definitions (
 );`
 
 // --- Data Map ---
-// In modbus-db-init/database/init.go
-
 var REG_MAP = []struct {
 	Address  uint16
 	Type     string
@@ -93,12 +92,11 @@ var REG_MAP = []struct {
 	{Address: 40002, Type: "bitmap", Points: map[uint]PointDefinition{
 		0: {PointName: "Chlorinator Pump Enabled", Acronym: "PW1-TS-DOS-SS", IOType: "DO", IONumber: 17, NormalState: uintPtr(0), StateOn: "ENABLED", StateOff: "DISABLED"},
 	}},
-	// ... Analog points are unchanged ...
-	{Address: 40003, Type: "analog", Name: "Tank Level", Acronym: "PW1-TANK-SP", IOType: "AO", IONumber: 3, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 231}},
+	{Address: 40003, Type: "analog", Name: "Tank Level SP", Acronym: "PW1-TANK-SP", IOType: "AO", IONumber: 3, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 231}},
 	{Address: 40004, Type: "analog", Name: "Start SP", Acronym: "PW1-START-SP", IOType: "AO", IONumber: 4, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 231, EngLow: 0, EngHigh: 231}},
 	{Address: 40005, Type: "analog", Name: "Stop SP", Acronym: "PW1-STOP-SP", IOType: "AO", IONumber: 5, DataType: "unsigned", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 231, EngLow: 0, EngHigh: 231}},
-	{Address: 40008, Type: "analog", Name: "SCADA Clock", IOType: "AO", IONumber: 8, DataType: "unsigned"},
-	{Address: 40009, Type: "analog", Name: "SCADA Clock (low)", IOType: "AO", IONumber: 9, DataType: "unsigned"},
+	{Address: 40008, Type: "analog", Name: "SCADA Clock", Acronym: "", IOType: "AO", IONumber: 8, DataType: "unsigned"},
+	{Address: 40009, Type: "analog", Name: "SCADA Clock (low)", Acronym: "", IOType: "AO", IONumber: 9, DataType: "unsigned"},
 
 	// --- STATUS REGISTERS ---
 	{Address: 41001, Type: "bitmap", Points: map[uint]PointDefinition{
@@ -126,7 +124,6 @@ var REG_MAP = []struct {
 		14: {PointName: "Pump OFF Command", Acronym: "PW1-STOP", IOType: "DI", IONumber: 15, NormalState: uintPtr(0), StateOn: "Active", StateOff: "Inactive"},
 		15: {PointName: "Pump Auto Command", Acronym: "PW1-AUTO-ENA", IOType: "DI", IONumber: 16, NormalState: uintPtr(0), StateOn: "Active", StateOff: "Inactive"},
 	}},
-	// ... rest of analog points are unchanged ...
 	{Address: 41003, Type: "analog", Name: "Flow", Acronym: "PW1-FLOW", IOType: "AI", IONumber: 3, DataType: "signed", Unit: "gpm", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 1500}},
 	{Address: 41004, Type: "analog", Name: "Drawdown", Acronym: "PW1-DRAW-LVL", IOType: "AI", IONumber: 4, DataType: "signed", Unit: "ft", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 231}},
 	{Address: 41005, Type: "analog", Name: "Discharge Pressure", Acronym: "PW1-DIS-PRES", IOType: "AI", IONumber: 5, DataType: "signed", Unit: "psi", Scaling: &ScalingParams{RawLow: 0, RawHigh: 30840, EngLow: 0, EngHigh: 200}},
@@ -140,7 +137,6 @@ func uintPtr(u uint) *uint {
 	return &u
 }
 
-// CreateAndPopulate creates the database schema and fills it with the default configuration.
 func CreateAndPopulate(db *sql.DB) error {
 	log.Println("Creating database schema...")
 	if _, err := db.Exec(createPointDefsSQL); err != nil {
@@ -178,25 +174,7 @@ func CreateAndPopulate(db *sql.DB) error {
 			if regDef.Scaling != nil {
 				sc_rl, sc_rh, sc_el, sc_eh = &regDef.Scaling.RawLow, &regDef.Scaling.RawHigh, &regDef.Scaling.EngLow, &regDef.Scaling.EngHigh
 			}
-			_, err := pointStmt.Exec(
-				regDef.Name,       // 1-point_name
-				regDef.Acronym,    // 2-acronym
-				regDef.IOType,     // 3-io_type
-				regDef.IONumber,   // 4-io_number
-				regDef.Address,    // 5-modbus_address
-				nil,               // 6-modbus_bit
-				"analog",          // 7-point_type
-				regDef.DataType,   // 8-data_type
-				regDef.Unit,       // 9-units
-				nil,               // 10-normal_state
-				nil,               // 11-state_on
-				nil,               // 12-state_off
-				sc_rl,             // 13-scaling_raw_low
-				sc_rh,             // 14-scaling_raw_high
-				sc_el,             // 15-scaling_eng_low
-				sc_eh,             // 16-scaling_eng_high
-				true,              // 17-log_events
-			)
+			_, err := pointStmt.Exec(regDef.Name, regDef.Acronym, regDef.IOType, regDef.IONumber, regDef.Address, nil, "analog", regDef.DataType, regDef.Unit, nil, nil, nil, sc_rl, sc_rh, sc_el, sc_eh, true)
 			if err != nil {
 				log.Printf("WARNING: Failed to insert analog point %s: %v. Skipping.", regDef.Name, err)
 				continue
@@ -204,25 +182,7 @@ func CreateAndPopulate(db *sql.DB) error {
 			pointCount++
 		} else { // bitmap
 			for bit, pointDef := range regDef.Points {
-				_, err := pointStmt.Exec(
-					pointDef.PointName,      // 1-point_name
-					pointDef.Acronym,        // 2-acronym
-					pointDef.IOType,         // 3-io_type
-					pointDef.IONumber,       // 4-io_number
-					regDef.Address,          // 5-modbus_address
-					bit,                     // 6-modbus_bit
-					"bitmap",                // 7-point_type
-					"unsigned",              // 8-data_type
-					nil,                     // 9-units
-					pointDef.NormalState,    // 10-normal_state
-					pointDef.StateOn,        // 11-state_on
-					pointDef.StateOff,       // 12-state_off
-					nil,                     // 13-scaling_raw_low
-					nil,                     // 14-scaling_raw_high
-					nil,                     // 15-scaling_eng_low
-					nil,                     // 16-scaling_eng_high
-					true,                    // 17-log_events
-				)
+				_, err := pointStmt.Exec(pointDef.PointName, pointDef.Acronym, pointDef.IOType, pointDef.IONumber, regDef.Address, bit, "bitmap", "unsigned", nil, pointDef.NormalState, pointDef.StateOn, pointDef.StateOff, nil, nil, nil, nil, true)
 				if err != nil {
 					log.Printf("WARNING: Failed to insert bitmap point %s: %v. Skipping.", pointDef.PointName, err)
 					continue

@@ -1,3 +1,4 @@
+// ===== C:\Projects\modbus-tools\modbus-go-poller\poller\state.go =====
 package poller
 
 import (
@@ -8,11 +9,24 @@ import (
 	"time"
 )
 
-// Command structs
+// IO_Result carries the raw result of an I/O operation to avoid locking the state in the IO loop.
+type IO_Result struct {
+	TxTime time.Time
+	RTT    float64
+	Tx     []byte
+	Rx     []byte
+}
+
 type SetBitCmd struct{ Addr uint16; Bit uint; Val bool }
 type WriteEngCmd struct{ Addr uint16; EngVal float64 }
+type WriteRawCmd struct{ Addr uint16; Value uint16 }
+type PulseDOUCmd struct {
+	Addr     uint16
+	Bit      uint
+	Duration time.Duration
+	Acronym  string
+}
 
-// Data-only structs
 type TxRxInfo struct {
 	Timestamp string
 	Hex       string
@@ -21,13 +35,12 @@ type TxRxInfo struct {
 type TimingInfo struct{ RoundTripTimeMs float64 }
 type ActiveAlarm struct{ Severity string; Message string }
 
-// PollerState holds the application's live data.
 type PollerState struct {
 	mu                sync.Mutex
 	Config            *config.AppConfig
 	CurrentRegisters  map[uint16]uint16
 	PreviousRegisters map[uint16]uint16
-	LastChange        map[uint16]time.Time // Authoritative change times
+	LastChange        map[uint16]time.Time
 	ActiveAlarms      map[string]ActiveAlarm
 	LastTx            TxRxInfo
 	LastRx            TxRxInfo
@@ -35,21 +48,21 @@ type PollerState struct {
 	Status            string
 	CommandChan       chan interface{}
 	DBEventChan       chan<- database.Event
-	WriteSuppressions map[string]string
+	IOResultChan      chan IO_Result // Bidirectional for sender (IO) and receiver (StateProcessor)
 	lastHeartbeatTime uint32
 }
 
-func NewPollerState(dbEventChan chan<- database.Event, appConfig *config.AppConfig) *PollerState {
+func NewPollerState(dbEventChan chan<- database.Event, ioResultChan chan IO_Result, appConfig *config.AppConfig) *PollerState {
 	ps := &PollerState{
 		Config:            appConfig,
 		CurrentRegisters:  make(map[uint16]uint16),
 		PreviousRegisters: make(map[uint16]uint16),
-		LastChange:        make(map[uint16]time.Time), // Initialize the map
+		LastChange:        make(map[uint16]time.Time),
 		ActiveAlarms:      make(map[string]ActiveAlarm),
 		Status:            "Initializing...",
 		CommandChan:       make(chan interface{}, 10),
 		DBEventChan:       dbEventChan,
-		WriteSuppressions: make(map[string]string),
+		IOResultChan:      ioResultChan,
 		lastHeartbeatTime: 0,
 	}
 	for addr := range appConfig.PointsByAddress {
@@ -59,7 +72,9 @@ func NewPollerState(dbEventChan chan<- database.Event, appConfig *config.AppConf
 	return ps
 }
 
-func (ps *PollerState) SendCommand(cmd interface{}) { ps.CommandChan <- cmd }
+func (ps *PollerState) SendCommand(cmd interface{}) {
+	ps.CommandChan <- cmd
+}
 
 func (ps *PollerState) UpdateHeartbeat(high, low uint16, t uint32) {
 	ps.mu.Lock()

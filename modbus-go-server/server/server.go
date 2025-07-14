@@ -1,12 +1,14 @@
+// ===== C:\Projects\modbus-tools\modbus-go-server\server\server.go =====
 package server
 
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"modbus-go-server/config"
+	"modbus-tools/modbus-go-server/config"
 	"net"
 	"os"
 	"strconv"
@@ -56,14 +58,11 @@ func (s *Server) GetDatastoreSnapshot() map[uint16]uint16 {
 	return snapshot
 }
 
-// --- THIS IS THE FIX ---
-// This method was accidentally deleted and is now restored.
 func (s *Server) SetHeartbeat(enable bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.heartbeatOn = enable
 }
-// --- END OF FIX ---
 
 func (s *Server) RunCommandProcessor() {
 	s.log.Println("Command processor goroutine started.")
@@ -107,8 +106,10 @@ func (s *Server) HeartbeatLoop() {
 		case <-ticker.C:
 			s.mu.Lock()
 			if s.heartbeatOn {
-				currentVal := s.datastore[41009]
-				s.datastore[41009] = currentVal + 1
+				currentVal, ok := s.datastore[41009]
+				if ok {
+					s.datastore[41009] = currentVal + 1
+				}
 			}
 			s.mu.Unlock()
 		case <-s.shutdownChan:
@@ -188,7 +189,7 @@ func (s *Server) computeModbusCRC(data []byte) uint16 {
 	for _, b := range data {
 		crc ^= uint16(b)
 		for i := 0; i < 8; i++ {
-			if (crc & 0x0001) != 0 {
+			if (crc&0x0001) != 0 {
 				crc = (crc >> 1) ^ 0xA001
 			} else {
 				crc >>= 1
@@ -199,10 +200,13 @@ func (s *Server) computeModbusCRC(data []byte) uint16 {
 }
 
 func (s *Server) processRequestFrame(request []byte) []byte {
+	s.log.Printf("SRV RX: %X", request)
 	if len(request) < 8 {
+		s.log.Printf("Short frame received: len %d", len(request))
 		return nil
 	}
 	if request[0] != config.SlaveID {
+		s.log.Printf("Request for wrong slave ID: %d", request[0])
 		return nil
 	}
 	receivedCRC := binary.LittleEndian.Uint16(request[len(request)-2:])
@@ -239,51 +243,138 @@ func (s *Server) processRequestFrame(request []byte) []byte {
 		s.log.Printf("RX FC6: Addr %d, Value %d", humanAddr, value)
 		s.CommandChan <- WriteRawCmd{Addr: humanAddr, RawVal: value}
 		responsePDU = request[2:6]
+	case 16:
+		count := binary.BigEndian.Uint16(request[4:6])
+		byteCount := int(request[6])
+		if len(request) >= 7+byteCount {
+			s.log.Printf("RX FC16: Addr %d, Count %d", humanAddr, count)
+			for i := 0; i < int(count); i++ {
+				value := binary.BigEndian.Uint16(request[7+i*2:])
+				s.CommandChan <- WriteRawCmd{Addr: humanAddr + uint16(i), RawVal: value}
+			}
+			responsePDU = request[2:6]
+		} else {
+			s.log.Printf("Malformed FC16: Not enough data for byte count %d", byteCount)
+			return nil
+		}
 	default:
 		s.log.Printf("Unsupported function code: %d", funcCode)
-		return nil
+		responseFrame := []byte{config.SlaveID, funcCode | 0x80, 0x01}
+		crc := s.computeModbusCRC(responseFrame)
+		return append(responseFrame, byte(crc&0xFF), byte(crc>>8))
 	}
+
 	if responsePDU != nil {
 		responseFrame := append([]byte{config.SlaveID, funcCode}, responsePDU...)
 		crc := s.computeModbusCRC(responseFrame)
-		responseFrame = append(responseFrame, byte(crc&0xFF), byte(crc>>8))
-		return responseFrame
+		return append(responseFrame, byte(crc&0xFF), byte(crc>>8))
 	}
 	return nil
 }
 
 func (s *Server) handleConnection(conn io.ReadWriter) {
-	defer func() {
-		if c, ok := conn.(io.Closer); ok {
-			c.Close()
-		}
-	}()
-	for {
-		buffer := make([]byte, 256)
-		n, err := conn.Read(buffer)
-		if err != nil {
-			select {
-			case <-s.shutdownChan:
-				return
-			default:
-				if err != io.EOF {
-					s.log.Printf("Connection read error: %v", err)
-				}
-			}
-			break
-		}
-		if n > 0 {
-			request := buffer[:n]
-			response := s.processRequestFrame(request)
-			if response != nil {
-				_, err := conn.Write(response)
-				if err != nil {
-					s.log.Printf("Connection write error: %v", err)
-					break
-				}
-			}
-		}
-	}
+    defer func() {
+        if c, ok := conn.(io.Closer); ok {
+            c.Close()
+        }
+    }()
+
+    const maxPacketSize = 256
+    buffer := make([]byte, 0, maxPacketSize)
+    temp := make([]byte, maxPacketSize)
+    lastRead := time.Now()
+    interFrameTimeout := 4 * time.Millisecond // ~3.5 char times at 9600 baud
+
+    for {
+        // Set a short read timeout to allow checking for inter-frame gaps
+        if serialPort, ok := conn.(serial.Port); ok {
+            serialPort.SetReadTimeout(1 * time.Millisecond)
+        }
+
+        n, err := conn.Read(temp)
+        if err != nil {
+            if err != io.EOF && !os.IsTimeout(err) {
+                s.log.Printf("Connection read error: %v", err)
+                return
+            }
+        }
+
+        if n > 0 {
+            buffer = append(buffer, temp[:n]...)
+            lastRead = time.Now()
+        }
+
+        // Process buffer if we have enough data or an inter-frame gap has occurred
+        for len(buffer) > 0 && (n == 0 || time.Since(lastRead) >= interFrameTimeout) {
+            // Minimum Modbus RTU packet: 1 (slave ID) + 1 (func code) + 2 (CRC) = 4 bytes
+            if len(buffer) < 4 {
+                s.log.Printf("Short frame received: len %d", len(buffer))
+                buffer = buffer[:0] // Clear buffer
+                continue
+            }
+
+            // Check slave ID
+            if buffer[0] != config.SlaveID {
+                s.log.Printf("Request for wrong slave ID: %d", buffer[0])
+                buffer = buffer[1:] // Slide window
+                continue
+            }
+
+            // Determine expected packet length based on function code
+            funcCode := buffer[1]
+            expectedLen := 0
+            switch funcCode {
+            case 3, 4: // Read Holding/Input Registers
+                if len(buffer) >= 6 {
+                    expectedLen = 8 // SlaveID(1) + FuncCode(1) + Addr(2) + Count(2) + CRC(2)
+                }
+            case 6: // Write Single Register
+                expectedLen = 8 // SlaveID(1) + FuncCode(1) + Addr(2) + Value(2) + CRC(2)
+            case 16: // Write Multiple Registers
+                if len(buffer) >= 7 {
+                    byteCount := int(buffer[6])
+                    expectedLen = 7 + byteCount + 2 // SlaveID(1) + FuncCode(1) + Addr(2) + Count(2) + ByteCount(1) + Data + CRC(2)
+                }
+            default:
+                // Unsupported function code: return exception
+                responseFrame := []byte{config.SlaveID, funcCode | 0x80, 0x01}
+                crc := s.computeModbusCRC(responseFrame)
+                responseFrame = append(responseFrame, byte(crc&0xFF), byte(crc>>8))
+                s.log.Printf("SRV TX: %X", responseFrame)
+                conn.Write(responseFrame)
+                buffer = buffer[1:] // Slide window
+                continue
+            }
+
+            // Wait for more data if packet is incomplete
+            if expectedLen == 0 || len(buffer) < expectedLen {
+                if n == 0 && time.Since(lastRead) >= interFrameTimeout {
+                    s.log.Printf("Incomplete frame received: len %d, expected %d", len(buffer), expectedLen)
+                    buffer = buffer[:0] // Clear buffer
+                }
+                break
+            }
+
+            // Process complete packet
+            request := buffer[:expectedLen]
+            buffer = buffer[expectedLen:] // Remove processed packet
+            response := s.processRequestFrame(request)
+            if response != nil {
+                s.log.Printf("SRV TX: %X", response)
+                _, err := conn.Write(response)
+                if err != nil {
+                    s.log.Printf("Connection write error: %v", err)
+                    return
+                }
+            }
+        }
+
+        // Reset buffer if it grows too large (e.g., garbage data)
+        if len(buffer) >= maxPacketSize {
+            s.log.Printf("Buffer overflow, clearing buffer")
+            buffer = buffer[:0]
+        }
+    }
 }
 
 func (s *Server) RunTCP() {
@@ -305,7 +396,9 @@ func (s *Server) RunTCP() {
 			case <-s.shutdownChan:
 				return
 			default:
-				s.log.Printf("Failed to accept connection: %v", err)
+				if !errors.Is(err, net.ErrClosed) {
+					s.log.Printf("Failed to accept connection: %v", err)
+				}
 			}
 			continue
 		}
@@ -315,23 +408,24 @@ func (s *Server) RunTCP() {
 
 func (s *Server) RunSerial(portName string) {
 	s.log.Println("Starting Manual Serial server on", portName)
-	mode := &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit}
+	mode := &serial.Mode{BaudRate: 9600}
 	for {
 		select {
 		case <-s.shutdownChan:
 			return
 		default:
-			port, err := serial.Open(portName, mode)
-			if err != nil {
-				s.log.Printf("Failed to open serial port %s: %v. Retrying in 5s...", portName, err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			s.port = port
-			s.log.Printf("Serial port %s opened successfully.", portName)
-			s.handleConnection(s.port)
-			s.log.Printf("Serial port %s connection closed.", portName)
 		}
+		port, err := serial.Open(portName, mode)
+		if err != nil {
+			s.log.Printf("Failed to open serial port %s: %v. Retrying in 5s...", portName, err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		s.port = port
+		port.SetReadTimeout(1 * time.Second)
+		s.log.Printf("Serial port %s opened successfully.", portName)
+		s.handleConnection(s.port)
+		s.log.Printf("Serial port %s connection closed, reopening...", portName)
 	}
 }
 

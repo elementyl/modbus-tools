@@ -79,8 +79,8 @@ func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 }
 
 func ScaleValue(rawVal uint16, p *config.PointDefinition) float64 {
-	if p.Scaling == nil {
-		if p.DataType == "signed" {
+	if p == nil || p.Scaling == nil {
+		if p != nil && p.DataType == "signed" {
 			return float64(int16(rawVal))
 		}
 		return float64(rawVal)
@@ -101,7 +101,7 @@ func ScaleValue(rawVal uint16, p *config.PointDefinition) float64 {
 
 func UnscaleValue(engVal float64, p *config.PointDefinition) uint16 {
 	if p == nil || p.Scaling == nil {
-		return uint16(engVal)
+		return uint16(math.Round(engVal))
 	}
 	s := p.Scaling
 	engRange := s.EngHigh - s.EngLow

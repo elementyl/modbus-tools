@@ -5,7 +5,10 @@
 *.db*
 
 # Ignore log files
-*.log
+*.log*
+
+# Ignore manually backed up go files
+*.go-*
 
 # Ignore VS Code and other editor metadata
 .vscode/

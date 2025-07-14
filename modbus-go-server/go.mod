@@ -1,4 +1,5 @@
-module github.com/elementyl/modbus-tools/modbus-go-server
+// ===== C:\Projects\modbus-tools\modbus-go-server\go.mod =====
+module modbus-tools/modbus-go-server
 
 go 1.24.4
 

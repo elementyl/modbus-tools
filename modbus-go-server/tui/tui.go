@@ -1,10 +1,13 @@
+// ===== C:\Projects\modbus-tools\modbus-go-server\tui\tui.go =====
 package tui
 
 import (
 	"fmt"
 	"log"
-	"modbus-go-server/config"
-	"modbus-go-server/server"
+	// --- THIS IS THE FIX ---
+	"modbus-tools/modbus-go-server/config"
+	"modbus-tools/modbus-go-server/server"
+	// --- END OF FIX ---
 	"sort"
 	"strconv"
 	"strings"
@@ -116,9 +119,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// --- THIS IS THE FIX ---
-		return m, nil // Missing return statement added
-		// --- END OF FIX ---
+		return m, nil
 	}
 
 	m.textInput, cmd = m.textInput.Update(msg)
@@ -179,6 +180,5 @@ func (m Model) View() string {
 
 	footer := fmt.Sprintf("\n%s\n%s", m.textInput.View(), m.status)
 	viewContent := b.String() + footer
-	m.log.Printf("--- TUI VIEW START ---\n%s--- TUI VIEW END ---", viewContent)
 	return viewContent
 }

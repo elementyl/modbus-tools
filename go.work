@@ -1,6 +1,8 @@
+// ===== C:\Projects\modbus-tools\go.work =====
 go 1.24.4
 
 use (
 	./modbus-db-init
 	./modbus-go-poller
+	./modbus-go-server
 )
