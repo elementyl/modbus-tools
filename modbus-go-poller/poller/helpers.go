@@ -1,3 +1,4 @@
+// ===== C:\Projects\modbus-tools\modbus-go-poller\poller\helpers.go =====
 package poller
 
 import (
@@ -5,20 +6,24 @@ import (
 	"fmt"
 	"math"
 	"modbus-tools/modbus-go-poller/config"
+	"strings"
 )
 
 func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 	cfg := &config.AppConfig{
-		PointsByAddress: make(map[uint16][]*config.PointDefinition),
-		PointsByName:    make(map[string]*config.PointDefinition),
-		PointsByAcronym: make(map[string][]*config.PointDefinition),
-		AlarmsByPoint:   make(map[string][]*config.AlarmDefinition),
+		PointsByAddress:  make(map[uint16][]*config.PointDefinition),
+		PointsByName:     make(map[string]*config.PointDefinition),
+		PointsByAcronym:  make(map[string][]*config.PointDefinition),
+		AlarmsByPoint:    make(map[string][]*config.AlarmDefinition),
+		ByIOTypeNumber:   make(map[string]map[int]*config.PointDefinition), // Initialize map
 	}
+
 	rows, err := db.Query("SELECT point_name, acronym, io_type, io_number, modbus_address, modbus_bit, point_type, data_type, units, normal_state, state_on, state_off, scaling_raw_low, scaling_raw_high, scaling_eng_low, scaling_eng_high, log_events FROM point_definitions")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query point_definitions: %w", err)
 	}
 	defer rows.Close()
+
 	for rows.Next() {
 		p := &config.PointDefinition{}
 		var bit, normalState, ioNum sql.NullInt64
@@ -52,18 +57,22 @@ func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 				EngHigh: sc_eh.Float64,
 			}
 		}
+
 		cfg.PointsByAddress[p.Address] = append(cfg.PointsByAddress[p.Address], p)
 		cfg.PointsByName[p.PointName] = p
 		if p.Acronym != "" {
 			cfg.PointsByAcronym[p.Acronym] = append(cfg.PointsByAcronym[p.Acronym], p)
 		}
 	}
+
 	rows.Close()
+
 	rows, err = db.Query("SELECT point_name, alarm_type, limit_value, severity, message FROM alarm_definitions")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query alarm_definitions: %w", err)
 	}
 	defer rows.Close()
+
 	for rows.Next() {
 		a := &config.AlarmDefinition{}
 		var limit sql.NullFloat64
@@ -75,6 +84,18 @@ func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 		}
 		cfg.AlarmsByPoint[a.PointName] = append(cfg.AlarmsByPoint[a.PointName], a)
 	}
+
+	// Populate ByIOTypeNumber after loading points
+	for _, p := range cfg.PointsByName {
+		if p.IOType != "" && p.IONumber > 0 {
+			iot := strings.ToUpper(p.IOType)
+			if _, ok := cfg.ByIOTypeNumber[iot]; !ok {
+				cfg.ByIOTypeNumber[iot] = make(map[int]*config.PointDefinition)
+			}
+			cfg.ByIOTypeNumber[iot][p.IONumber] = p
+		}
+	}
+
 	return cfg, nil
 }
 

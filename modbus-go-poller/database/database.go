@@ -14,12 +14,13 @@ import (
 
 // Event represents a single loggable action or state change in the system.
 type Event struct {
-	Timestamp     time.Time
-	PointName     string
-	PreviousValue string
-	NewValue      string
-	Units         string
-	EventType     string
+	Timestamp      time.Time
+	PointName      string
+	PreviousValue  string
+	NewValue       string
+	NewValueRaw    int64  // CHANGED: Raw (unscaled) new value as INTEGER
+	Units          string
+	EventType      string
 }
 
 const createTableSQL = `
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
     point_name TEXT NOT NULL,
     previous_value TEXT,
     new_value TEXT,
+    new_value_raw INTEGER,  -- CHANGED: Column for raw value as INTEGER
     units TEXT,
     event_type TEXT NOT NULL
 );`
@@ -58,7 +60,6 @@ func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Ev
 				return // Can't write if we can't open DB
 			}
 			dbConnections[dateStr] = db
-
 			logger.Println("DatabaseWriter: Waiting to Exec createTableSQL...")
 			_, err = db.Exec(createTableSQL)
 			logger.Println("DatabaseWriter: Done Exec createTableSQL.")
@@ -70,20 +71,17 @@ func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Ev
 			}
 			logger.Printf("Successfully opened and verified database: %s", fileName)
 		}
-
 		logger.Println("DatabaseWriter: Waiting to Prepare INSERT...")
-		stmt, err := db.Prepare("INSERT INTO events(timestamp, point_name, previous_value, new_value, units, event_type) VALUES(?, ?, ?, ?, ?, ?)")
+		stmt, err := db.Prepare("INSERT INTO events(timestamp, point_name, previous_value, new_value, new_value_raw, units, event_type) VALUES(?, ?, ?, ?, ?, ?, ?)")
 		logger.Println("DatabaseWriter: Done Preparing INSERT.")
 		if err != nil {
 			logger.Printf("ERROR: Failed to prepare SQL statement: %v", err)
 			return
 		}
 		defer stmt.Close()
-
 		timestampStr := event.Timestamp.Format("2006-01-02 15:04:05.000")
-
 		logger.Println("DatabaseWriter: Waiting to Exec INSERT...")
-		_, err = stmt.Exec(timestampStr, event.PointName, event.PreviousValue, event.NewValue, event.Units, event.EventType)
+		_, err = stmt.Exec(timestampStr, event.PointName, event.PreviousValue, event.NewValue, event.NewValueRaw, event.Units, event.EventType)
 		logger.Println("DatabaseWriter: Done Exec INSERT.")
 		if err != nil {
 			logger.Printf("ERROR: Failed to insert event into database: %v", err)
@@ -97,7 +95,6 @@ func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Ev
 				return
 			}
 			writeEvent(event)
-
 		case <-ctx.Done():
 			logger.Println("Shutdown signal received. Writing remaining events to database...")
 			for len(eventChan) > 0 {
