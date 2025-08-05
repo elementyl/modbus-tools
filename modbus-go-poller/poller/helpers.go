@@ -4,10 +4,10 @@ package poller
 import (
 	"database/sql"
 	"fmt"
-	"modbus-tools/modbus-go-poller/config" // Existing imports
+	"log"
+	"math"
+	"modbus-tools/modbus-go-poller/config"
 	"strings"
-	"log"    // Added for logging
-	"math"   // NEW: Added for math.Round and other math functions
 )
 
 func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
@@ -18,17 +18,17 @@ func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 		AlarmsByPoint:   make(map[string][]*config.AlarmDefinition),
 		ByIOTypeNumber:  make(map[string]map[int]*config.PointDefinition), // Initialize map
 	}
-	rows, err := db.Query("SELECT point_name, acronym, io_type, io_number, modbus_address, modbus_bit, point_type, data_type, units, normal_state, state_on, state_off, scaling_raw_low, scaling_raw_high, scaling_eng_low, scaling_eng_high, log_events FROM point_definitions")
+	rows, err := db.Query("SELECT point_name, acronym, io_type, io_number, modbus_address, modbus_bit, point_type, data_type, units, normal_state, state_on, state_off, scaling_raw_low, scaling_raw_high, scaling_eng_low, scaling_eng_high, log_events, pulse_on_start, pulse_duration_tenths FROM point_definitions")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query point_definitions: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		p := &config.PointDefinition{}
-		var bit, normalState, ioNum sql.NullInt64
+		var bit, normalState, ioNum, pulseOnStart, pulseDurationTenths sql.NullInt64
 		var acronym, ioType, unit, stateOn, stateOff, dataType sql.NullString
 		var sc_rl, sc_rh, sc_el, sc_eh sql.NullFloat64
-		if err := rows.Scan(&p.PointName, &acronym, &ioType, &ioNum, &p.Address, &bit, &p.Type, &dataType, &unit, &normalState, &stateOn, &stateOff, &sc_rl, &sc_rh, &sc_el, &sc_eh, &p.LogEvents); err != nil {
+		if err := rows.Scan(&p.PointName, &acronym, &ioType, &ioNum, &p.Address, &bit, &p.Type, &dataType, &unit, &normalState, &stateOn, &stateOff, &sc_rl, &sc_rh, &sc_el, &sc_eh, &p.LogEvents, &pulseOnStart, &pulseDurationTenths); err != nil {
 			return nil, err
 		}
 		p.Acronym = acronym.String
@@ -55,6 +55,12 @@ func LoadConfigurationFromDB(db *sql.DB) (*config.AppConfig, error) {
 				EngLow:  sc_el.Float64,
 				EngHigh: sc_eh.Float64,
 			}
+		}
+		if pulseOnStart.Valid {
+			p.PulseOnStart = pulseOnStart.Int64 == 1
+		}
+		if pulseDurationTenths.Valid {
+			p.PulseDurationTenths = int(pulseDurationTenths.Int64)
 		}
 		cfg.PointsByAddress[p.Address] = append(cfg.PointsByAddress[p.Address], p)
 		cfg.PointsByName[p.PointName] = p

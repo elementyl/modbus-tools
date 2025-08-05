@@ -570,12 +570,11 @@ func ParseAndExecuteCommand(cmdStr string, state *PollerState, logger *log.Logge
 	}
 	command := strings.ToLower(parts[0])
 	switch command {
-	case "set", "s", "clear", "c":
+	case "set", "s":
 		if len(parts) < 2 {
 			return "", fmt.Errorf("%s requires acronym or IO_NUMBER", command)
 		}
 		target := parts[1]
-		isSet := (command == "set" || command == "s")
 		// Check if target is numeric (IO_NUMBER for DO)
 		num, err := strconv.Atoi(target)
 		if err == nil {
@@ -583,7 +582,53 @@ func ParseAndExecuteCommand(cmdStr string, state *PollerState, logger *log.Logge
 			if !found || p.Type != "bitmap" {
 				return "", fmt.Errorf("DO %d not found or not bitmap", num)
 			}
-			state.SendCommand(SetBitCmd{Addr: p.Address, Bit: *p.Bit, Val: isSet})
+			if p.PulseOnStart {
+				durationTenths := p.PulseDurationTenths
+				if durationTenths <= 0 {
+					durationTenths = 10 // Default 1s
+				}
+				raiCmd := fmt.Sprintf("rai %d %d", num, durationTenths)
+				logger.Printf("DEBUG: Redirecting set to rai command: %s", raiCmd)
+				return ParseAndExecuteCommand(raiCmd, state, logger)
+			}
+			state.SendCommand(SetBitCmd{Addr: p.Address, Bit: *p.Bit, Val: true})
+			logger.Printf("External command: set DO%d (%s)", num, p.Acronym)
+			return "OK", nil
+		}
+		// Fallback to acronym
+		points, found := state.Config.PointsByAcronym[strings.ToUpper(target)]
+		if !found || len(points) == 0 {
+			return "", fmt.Errorf("acronym '%s' not found", target)
+		}
+		pointDef := points[0]
+		if pointDef.Type != "bitmap" {
+			return "", fmt.Errorf("acronym '%s' is not a bitmap point", target)
+		}
+		if pointDef.PulseOnStart {
+			durationTenths := pointDef.PulseDurationTenths
+			if durationTenths <= 0 {
+				durationTenths = 10 // Default 1s
+			}
+			raiCmd := fmt.Sprintf("rai %d %d", pointDef.IONumber, durationTenths)
+			logger.Printf("DEBUG: Redirecting set to rai command: %s", raiCmd)
+			return ParseAndExecuteCommand(raiCmd, state, logger)
+		}
+		state.SendCommand(SetBitCmd{Addr: pointDef.Address, Bit: *pointDef.Bit, Val: true})
+		logger.Printf("External command: set %s", target)
+		return "OK", nil
+	case "clear", "c":
+		if len(parts) < 2 {
+			return "", fmt.Errorf("%s requires acronym or IO_NUMBER", command)
+		}
+		target := parts[1]
+		// Check if target is numeric (IO_NUMBER for DO)
+		num, err := strconv.Atoi(target)
+		if err == nil {
+			p, found := state.Config.ByIOTypeNumber["DO"][num]
+			if !found || p.Type != "bitmap" {
+				return "", fmt.Errorf("DO %d not found or not bitmap", num)
+			}
+			state.SendCommand(SetBitCmd{Addr: p.Address, Bit: *p.Bit, Val: false})
 			logger.Printf("External command: %s DO%d (%s)", command, num, p.Acronym)
 			return "OK", nil
 		}
@@ -596,45 +641,8 @@ func ParseAndExecuteCommand(cmdStr string, state *PollerState, logger *log.Logge
 		if pointDef.Type != "bitmap" {
 			return "", fmt.Errorf("acronym '%s' is not a bitmap point", target)
 		}
-		state.SendCommand(SetBitCmd{Addr: pointDef.Address, Bit: *pointDef.Bit, Val: isSet})
+		state.SendCommand(SetBitCmd{Addr: pointDef.Address, Bit: *pointDef.Bit, Val: false})
 		logger.Printf("External command: %s %s", command, target)
-		return "OK", nil
-	case "raise":
-		if len(parts) < 2 {
-			return "", fmt.Errorf("raise requires IO_NUMBER or acronym")
-		}
-		target := parts[1]
-		durationTenths := 10 // Default 1s
-		if len(parts) > 2 {
-			var err error
-			durationTenths, err = strconv.Atoi(parts[2])
-			if err != nil || durationTenths <= 0 {
-				return "", fmt.Errorf("invalid duration: %s", parts[2])
-			}
-		}
-		duration := time.Duration(durationTenths * 100) * time.Millisecond
-		// Check if target is numeric (IO_NUMBER for DO)
-		num, err := strconv.Atoi(target)
-		if err == nil {
-			p, found := state.Config.ByIOTypeNumber["DO"][num]
-			if !found || p.Type != "bitmap" {
-				return "", fmt.Errorf("DO %d not found or not bitmap", num)
-			}
-			state.SendCommand(PulseDOUCmd{Addr: p.Address, Bit: *p.Bit, Duration: duration, Acronym: p.Acronym})
-			logger.Printf("External command: Pulsed DO%d (%s) for %v", num, p.Acronym, duration)
-			return "OK", nil
-		}
-		// Fallback to acronym
-		points, found := state.Config.PointsByAcronym[strings.ToUpper(target)]
-		if !found || len(points) == 0 {
-			return "", fmt.Errorf("acronym '%s' not found", target)
-		}
-		pointDef := points[0]
-		if pointDef.IOType != "DO" {
-			return "", fmt.Errorf("acronym '%s' is not a DO", target)
-		}
-		state.SendCommand(PulseDOUCmd{Addr: pointDef.Address, Bit: *pointDef.Bit, Duration: duration, Acronym: pointDef.Acronym})
-		logger.Printf("External command: Pulsed %s for %v", target, duration)
 		return "OK", nil
 	case "write":
 		if len(parts) < 3 {
@@ -752,6 +760,15 @@ func ParseAndExecuteCommand(cmdStr string, state *PollerState, logger *log.Logge
 		if !found || p.Type != "bitmap" {
 			return "", fmt.Errorf("DO %d not found or not bitmap", num)
 		}
+		if p.PulseOnStart {
+			durationTenths := p.PulseDurationTenths
+			if durationTenths <= 0 {
+				durationTenths = 10 // Default 1s
+			}
+			raiCmd := fmt.Sprintf("rai %d %d", num, durationTenths)
+			logger.Printf("DEBUG: Redirecting str to rai command: %s", raiCmd)
+			return ParseAndExecuteCommand(raiCmd, state, logger)
+		}
 		state.SendCommand(SetBitCmd{Addr: p.Address, Bit: *p.Bit, Val: true})
 		logger.Printf("External command: str DO%d (%s)", num, p.Acronym)
 		return "OK", nil
@@ -811,6 +828,43 @@ func ParseAndExecuteCommand(cmdStr string, state *PollerState, logger *log.Logge
 		duration := time.Duration(durationTenths * 100) * time.Millisecond
 		state.SendCommand(PulseDOUCmd{Addr: p.Address, Bit: *p.Bit, Duration: duration, Acronym: p.Acronym})
 		logger.Printf("External command: Pulsed DO%d (%s) for %v", num, p.Acronym, duration)
+		return "OK", nil
+	case "raise":
+		if len(parts) < 2 {
+			return "", fmt.Errorf("raise requires IO_NUMBER or acronym")
+		}
+		target := parts[1]
+		durationTenths := 10 // Default 1s
+		if len(parts) > 2 {
+			var err error
+			durationTenths, err = strconv.Atoi(parts[2])
+			if err != nil || durationTenths <= 0 {
+				return "", fmt.Errorf("invalid duration: %s", parts[2])
+			}
+		}
+		duration := time.Duration(durationTenths * 100) * time.Millisecond
+		// Check if target is numeric (IO_NUMBER for DO)
+		num, err := strconv.Atoi(target)
+		if err == nil {
+			p, found := state.Config.ByIOTypeNumber["DO"][num]
+			if !found || p.Type != "bitmap" {
+				return "", fmt.Errorf("DO %d not found or not bitmap", num)
+			}
+			state.SendCommand(PulseDOUCmd{Addr: p.Address, Bit: *p.Bit, Duration: duration, Acronym: p.Acronym})
+			logger.Printf("External command: Pulsed DO%d (%s) for %v", num, p.Acronym, duration)
+			return "OK", nil
+		}
+		// Fallback to acronym
+		points, found := state.Config.PointsByAcronym[strings.ToUpper(target)]
+		if !found || len(points) == 0 {
+			return "", fmt.Errorf("acronym '%s' not found", target)
+		}
+		pointDef := points[0]
+		if pointDef.IOType != "DO" {
+			return "", fmt.Errorf("acronym '%s' is not a DO", target)
+		}
+		state.SendCommand(PulseDOUCmd{Addr: pointDef.Address, Bit: *pointDef.Bit, Duration: duration, Acronym: pointDef.Acronym})
+		logger.Printf("External command: Pulsed %s for %v", target, duration)
 		return "OK", nil
 	default:
 		return "", fmt.Errorf("unknown command: %s", command)
