@@ -8,19 +8,18 @@ import (
 	"log"
 	"sync"
 	"time"
-
 	_ "modernc.org/sqlite"
 )
 
 // Event represents a single loggable action or state change in the system.
 type Event struct {
-	Timestamp      time.Time
-	PointName      string
-	PreviousValue  string
-	NewValue       string
-	NewValueRaw    int64  // CHANGED: Raw (unscaled) new value as INTEGER
-	Units          string
-	EventType      string
+	Timestamp     time.Time
+	PointName     string
+	PreviousValue string
+	NewValue      string
+	NewValueRaw   int64 // CHANGED: Raw (unscaled) new value as INTEGER
+	Units         string
+	EventType     string
 }
 
 const createTableSQL = `
@@ -30,7 +29,7 @@ CREATE TABLE IF NOT EXISTS events (
     point_name TEXT NOT NULL,
     previous_value TEXT,
     new_value TEXT,
-    new_value_raw INTEGER,  -- CHANGED: Column for raw value as INTEGER
+    new_value_raw INTEGER, -- CHANGED: Column for raw value as INTEGER
     units TEXT,
     event_type TEXT NOT NULL
 );`
@@ -46,7 +45,6 @@ func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Ev
 		}
 		logger.Println("Database Writer Goroutine Shutting Down.")
 	}()
-
 	// writeEvent is a helper closure to avoid duplicating code.
 	writeEvent := func(event Event) {
 		dateStr := event.Timestamp.Format("2006-01-02")
@@ -60,6 +58,12 @@ func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Ev
 				return // Can't write if we can't open DB
 			}
 			dbConnections[dateStr] = db
+			// Enable WAL mode for concurrent reads/writes
+			_, err = db.Exec("PRAGMA journal_mode = WAL;")
+			if err != nil {
+				logger.Printf("ERROR: Failed to set WAL mode for %s: %v", fileName, err)
+				// Continue without WAL, but note potential locking issues
+			}
 			logger.Println("DatabaseWriter: Waiting to Exec createTableSQL...")
 			_, err = db.Exec(createTableSQL)
 			logger.Println("DatabaseWriter: Done Exec createTableSQL.")
@@ -87,7 +91,6 @@ func DatabaseWriter(ctx context.Context, wg *sync.WaitGroup, eventChan <-chan Ev
 			logger.Printf("ERROR: Failed to insert event into database: %v", err)
 		}
 	}
-
 	for {
 		select {
 		case event, ok := <-eventChan:
